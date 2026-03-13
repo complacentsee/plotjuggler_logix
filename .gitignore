@@ -1,0 +1,4 @@
+build/
+pylogix/
+trend.py
+.DS_Store
