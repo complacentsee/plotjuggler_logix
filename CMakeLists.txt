@@ -49,6 +49,10 @@ target_link_libraries(DataStreamLogixTrend PRIVATE
     Qt5::Xml
 )
 
+if(WIN32)
+    target_link_libraries(DataStreamLogixTrend PRIVATE ws2_32)
+endif()
+
 if(plotjuggler_FOUND)
     target_link_libraries(DataStreamLogixTrend PRIVATE plotjuggler::plotjuggler_base)
 else()
@@ -58,9 +62,9 @@ else()
         ${PLOTJUGGLER_SRC_DIR}/3rdparty/sol2-3.5.0/include
     )
     target_link_libraries(DataStreamLogixTrend PRIVATE
-        ${PLOTJUGGLER_BUILD_DIR}/libplotjuggler_base.a
-        ${PLOTJUGGLER_BUILD_DIR}/3rdparty/qwt/src/libplotjuggler_qwt.a
-        ${PLOTJUGGLER_BUILD_DIR}/_deps/fmt-build/libfmt.a
+        ${PLOTJUGGLER_BUILD_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}plotjuggler_base${CMAKE_STATIC_LIBRARY_SUFFIX}
+        ${PLOTJUGGLER_BUILD_DIR}/3rdparty/qwt/src/${CMAKE_STATIC_LIBRARY_PREFIX}plotjuggler_qwt${CMAKE_STATIC_LIBRARY_SUFFIX}
+        ${PLOTJUGGLER_BUILD_DIR}/_deps/fmt-build/${CMAKE_STATIC_LIBRARY_PREFIX}fmt${CMAKE_STATIC_LIBRARY_SUFFIX}
     )
     # PlotJuggler version defines needed by headers
     target_compile_definitions(DataStreamLogixTrend PRIVATE

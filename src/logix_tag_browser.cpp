@@ -134,14 +134,8 @@ std::vector<TagInfo> TagBrowser::parseTagPacket(const std::vector<uint8_t>& data
             tags.push_back(tag);
         }
 
-        // Advance to next tag: 6 bytes header + name_len + type(2) + optional array size(2)
-        pos += 6 + name_len + 2;
-        if (tag.array_dims > 0) pos += 2;
-
-        // Align to even byte
-        // The packet format includes 20 bytes per tag entry overhead
-        // Actually pylogix uses: packet_start + tag_len + 20
-        // Let's use the same: pos should advance by name_len + 20 from start
+        // Each tag record is name_len + 20 bytes (fixed overhead of 20)
+        pos += name_len + 20;
     }
 
     return tags;

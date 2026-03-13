@@ -11,6 +11,7 @@
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 using SocketType = SOCKET;
+using ssize_t = int;
 constexpr SocketType kInvalidSocket = INVALID_SOCKET;
 #else
 #include <sys/socket.h>

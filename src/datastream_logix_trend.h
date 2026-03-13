@@ -50,10 +50,10 @@ private:
 
     LogixConfig config_;
 
-    // Timestamp tracking: we convert PLC microsecond timestamps to
-    // a monotonic seconds value for PlotJuggler
+    // Timestamp tracking: PLC trend timestamps are in CIP Wall Clock
+    // ticks (128 us per tick). We convert to monotonic seconds for PlotJuggler.
     bool first_sample_ = true;
-    uint32_t base_timestamp_us_ = 0;
+    uint32_t base_timestamp_ = 0;
     double time_offset_s_ = 0.0;
 };
 

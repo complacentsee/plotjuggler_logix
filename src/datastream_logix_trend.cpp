@@ -1,6 +1,7 @@
 #include "datastream_logix_trend.h"
 
 #include <QDomDocument>
+#include <QMessageBox>
 #include <chrono>
 
 namespace logix {
@@ -28,6 +29,8 @@ bool DataStreamLogixTrend::start(QStringList* selected_datasources) {
         conn_ = std::make_unique<EipConnection>();
         conn_->connect(config_.ip_address, route);
     } catch (const std::exception& e) {
+        QMessageBox::critical(nullptr, "Connection Error",
+                              QString("Failed to connect:\n%1").arg(e.what()));
         emit closed();
         return false;
     }
@@ -44,6 +47,10 @@ bool DataStreamLogixTrend::start(QStringList* selected_datasources) {
             trend->start(config_.sample_rate_us, buf_size);
             trends_.push_back(std::move(trend));
         } catch (const std::exception& e) {
+            QMessageBox::critical(nullptr, "Trend Error",
+                                  QString("Failed to start trend for '%1':\n%2")
+                                      .arg(QString::fromStdString(tag_name))
+                                      .arg(e.what()));
             // Clean up already-started trends
             trends_.clear();
             conn_->close();
@@ -68,7 +75,7 @@ bool DataStreamLogixTrend::start(QStringList* selected_datasources) {
 
     // Reset timestamp tracking
     first_sample_ = true;
-    base_timestamp_us_ = 0;
+    base_timestamp_ = 0;
     time_offset_s_ = 0.0;
 
     // Start polling thread
@@ -116,23 +123,25 @@ void DataStreamLogixTrend::pollingLoop() {
                     auto& series = dataMap().getOrCreateNumeric(trend->tagName());
 
                     for (const auto& sample : samples) {
-                        // Convert PLC timestamp to seconds
+                        // Convert PLC timestamp to seconds.
+                        // Trend timestamps are in CIP Wall Clock ticks (128 us per tick).
+                        constexpr double kTickToSeconds = 128.0 / 1e6;
                         double time_s;
                         if (first_sample_) {
-                            base_timestamp_us_ = sample.timestamp;
+                            base_timestamp_ = sample.timestamp;
                             first_sample_ = false;
                             time_s = 0.0;
                         } else {
-                            // Handle timestamp wraparound (uint32 microseconds)
-                            uint32_t delta_us;
-                            if (sample.timestamp >= base_timestamp_us_) {
-                                delta_us = sample.timestamp - base_timestamp_us_;
+                            // Handle timestamp wraparound (uint32)
+                            uint32_t delta;
+                            if (sample.timestamp >= base_timestamp_) {
+                                delta = sample.timestamp - base_timestamp_;
                             } else {
                                 // Wraparound
-                                delta_us = (0xFFFFFFFF - base_timestamp_us_) +
-                                           sample.timestamp + 1;
+                                delta = (0xFFFFFFFF - base_timestamp_) +
+                                        sample.timestamp + 1;
                             }
-                            time_s = static_cast<double>(delta_us) / 1e6;
+                            time_s = static_cast<double>(delta) * kTickToSeconds;
                         }
 
                         series.pushBack({time_s, sample.value});

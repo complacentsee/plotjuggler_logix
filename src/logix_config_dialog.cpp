@@ -101,13 +101,13 @@ void LogixConfigDialog::setupUi() {
     auto* rate_layout = new QHBoxLayout();
     rate_layout->addWidget(new QLabel("Rate:"));
     rate_combo_ = new QComboBox();
-    rate_combo_->addItem("1 ms (1000 us)", 1000u);
-    rate_combo_->addItem("5 ms (5000 us)", 5000u);
-    rate_combo_->addItem("10 ms (10000 us)", 10000u);
-    rate_combo_->addItem("50 ms (50000 us)", 50000u);
-    rate_combo_->addItem("100 ms (100000 us)", 100000u);
-    rate_combo_->addItem("500 ms (500000 us)", 500000u);
-    rate_combo_->addItem("1 s (1000000 us)", 1000000u);
+    rate_combo_->addItem("1 ms", 1000u);
+    rate_combo_->addItem("5 ms", 5000u);
+    rate_combo_->addItem("10 ms", 10000u);
+    rate_combo_->addItem("50 ms", 50000u);
+    rate_combo_->addItem("100 ms", 100000u);
+    rate_combo_->addItem("500 ms", 500000u);
+    rate_combo_->addItem("1 s", 1000000u);
     rate_combo_->addItem("Custom...", 0u);
     rate_combo_->setCurrentIndex(2); // default 10ms
 
@@ -240,17 +240,40 @@ void LogixConfigDialog::populateTagTree(const std::vector<TagInfo>& tags) {
                 struct_item->setText(2, "(no numeric members)");
             }
         } else if (isNumericType(tag.symbol_type)) {
-            // Scalar numeric tag — directly checkable
-            auto* tag_item = new QTreeWidgetItem(parent);
-            tag_item->setText(0, QString::fromStdString(display_name));
-            tag_item->setText(1, QString::fromStdString(tag.data_type_name));
-            if (tag.array_dims > 0) {
-                tag_item->setText(2, QString("[%1]").arg(tag.array_size));
+            if (tag.array_dims > 0 && tag.array_size > 0) {
+                // Array of numeric type — expand into individual elements
+                auto* array_item = new QTreeWidgetItem(parent);
+                array_item->setText(0, QString::fromStdString(display_name));
+                array_item->setText(1, QString::fromStdString(tag.data_type_name));
+                array_item->setText(2, QString("[%1]").arg(tag.array_size));
+                array_item->setFlags(array_item->flags() | Qt::ItemIsAutoTristate);
+
+                int max_elements = std::min(tag.array_size, 64);
+                for (int i = 0; i < max_elements; i++) {
+                    auto* elem_item = new QTreeWidgetItem(array_item);
+                    std::string elem_name = tag.name + "[" + std::to_string(i) + "]";
+                    elem_item->setText(0, QString("[%1]").arg(i));
+                    elem_item->setText(1, QString::fromStdString(tag.data_type_name));
+                    elem_item->setFlags(elem_item->flags() | Qt::ItemIsUserCheckable);
+                    elem_item->setCheckState(0, Qt::Unchecked);
+                    elem_item->setData(0, Qt::UserRole, QString::fromStdString(elem_name));
+                    elem_item->setData(1, Qt::UserRole, tag.symbol_type);
+                }
+
+                if (tag.array_size > 64) {
+                    auto* truncated = new QTreeWidgetItem(array_item);
+                    truncated->setText(0, QString("... %1 more elements").arg(tag.array_size - 64));
+                }
+            } else {
+                // Scalar numeric tag — directly checkable
+                auto* tag_item = new QTreeWidgetItem(parent);
+                tag_item->setText(0, QString::fromStdString(display_name));
+                tag_item->setText(1, QString::fromStdString(tag.data_type_name));
+                tag_item->setFlags(tag_item->flags() | Qt::ItemIsUserCheckable);
+                tag_item->setCheckState(0, Qt::Unchecked);
+                tag_item->setData(0, Qt::UserRole, QString::fromStdString(tag.name));
+                tag_item->setData(1, Qt::UserRole, tag.symbol_type);
             }
-            tag_item->setFlags(tag_item->flags() | Qt::ItemIsUserCheckable);
-            tag_item->setCheckState(0, Qt::Unchecked);
-            tag_item->setData(0, Qt::UserRole, QString::fromStdString(tag.name));
-            tag_item->setData(1, Qt::UserRole, tag.symbol_type);
         }
         // Non-numeric, non-struct tags (strings etc.) are skipped
     }

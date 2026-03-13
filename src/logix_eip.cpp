@@ -7,6 +7,16 @@
 #include <sstream>
 #include <thread>
 
+#ifdef _WIN32
+namespace {
+struct WinsockInit {
+    WinsockInit() { WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa); }
+    ~WinsockInit() { WSACleanup(); }
+};
+static WinsockInit s_winsock_init;
+}
+#endif
+
 namespace logix {
 
 // ─── Utility helpers ────────────────────────────────────────────────────────
@@ -63,10 +73,35 @@ std::vector<uint8_t> buildSymbolicSegment(const std::string& tag_name) {
     std::istringstream ss(tag_name);
     std::string part;
     while (std::getline(ss, part, '.')) {
+        // Check for array index: "TagName[index]"
+        std::string sym_name = part;
+        int array_index = -1;
+        auto bracket_pos = part.find('[');
+        if (bracket_pos != std::string::npos) {
+            sym_name = part.substr(0, bracket_pos);
+            auto end_bracket = part.find(']', bracket_pos);
+            if (end_bracket != std::string::npos) {
+                array_index = std::stoi(part.substr(bracket_pos + 1, end_bracket - bracket_pos - 1));
+            }
+        }
+
+        // Symbolic segment for the name
         appendU8(seg, 0x91);
-        appendU8(seg, static_cast<uint8_t>(part.size()));
-        for (char c : part) seg.push_back(static_cast<uint8_t>(c));
-        if (part.size() % 2) seg.push_back(0x00);
+        appendU8(seg, static_cast<uint8_t>(sym_name.size()));
+        for (char c : sym_name) seg.push_back(static_cast<uint8_t>(c));
+        if (sym_name.size() % 2) seg.push_back(0x00);
+
+        // Element segment for array index
+        if (array_index >= 0) {
+            if (array_index <= 0xFF) {
+                appendU8(seg, 0x28);
+                appendU8(seg, static_cast<uint8_t>(array_index));
+            } else {
+                appendU8(seg, 0x29);
+                appendU8(seg, 0x00);
+                appendU16(seg, static_cast<uint16_t>(array_index));
+            }
+        }
     }
     return seg;
 }
@@ -235,7 +270,7 @@ void EipConnection::registerSession() {
     appendU16(data, 0); // options
     auto pkt = buildEnipHeader(kRegisterSession, 0, data);
 
-    send(sock_, pkt.data(), pkt.size(), 0);
+    send(sock_, reinterpret_cast<const char*>(pkt.data()), static_cast<int>(pkt.size()), 0);
     auto resp = recvEnip();
     if (resp.size() < 24) throw std::runtime_error("RegisterSession response too short");
     uint32_t status = readU32(&resp[8]);
@@ -287,7 +322,7 @@ void EipConnection::forwardOpen() {
     payload.insert(payload.end(), fo.begin(), fo.end());
 
     auto pkt = buildEnipHeader(kSendRRData, session_, payload);
-    send(sock_, pkt.data(), pkt.size(), 0);
+    send(sock_, reinterpret_cast<const char*>(pkt.data()), static_cast<int>(pkt.size()), 0);
 
     auto resp = recvEnip();
     if (resp.size() < 24) throw std::runtime_error("Forward Open response too short");
@@ -328,7 +363,7 @@ std::vector<uint8_t> EipConnection::sendCip(const std::vector<uint8_t>& cip_mess
     payload.insert(payload.end(), cip_with_seq.begin(), cip_with_seq.end());
 
     auto pkt = buildEnipHeader(kSendUnitData, session_, payload);
-    send(sock_, pkt.data(), pkt.size(), 0);
+    send(sock_, reinterpret_cast<const char*>(pkt.data()), static_cast<int>(pkt.size()), 0);
 
     auto resp = recvEnip();
     if (resp.size() < 24) throw std::runtime_error("SendUnitData response too short");
@@ -374,7 +409,7 @@ std::vector<uint8_t> EipConnection::sendUnconnected(const std::vector<uint8_t>& 
     payload.insert(payload.end(), frame.begin(), frame.end());
 
     auto pkt = buildEnipHeader(kSendRRData, session_, payload);
-    send(sock_, pkt.data(), pkt.size(), 0);
+    send(sock_, reinterpret_cast<const char*>(pkt.data()), static_cast<int>(pkt.size()), 0);
 
     auto resp = recvEnip();
     if (resp.size() < 24) throw std::runtime_error("SendRRData response too short");
@@ -415,7 +450,7 @@ void EipConnection::forwardClose() {
     payload.insert(payload.end(), fc.begin(), fc.end());
 
     auto pkt = buildEnipHeader(kSendRRData, session_, payload);
-    send(sock_, pkt.data(), pkt.size(), 0);
+    send(sock_, reinterpret_cast<const char*>(pkt.data()), static_cast<int>(pkt.size()), 0);
 
     try { recvEnip(); } catch (...) {}
     ot_connection_id_ = 0;
@@ -430,7 +465,7 @@ void EipConnection::close() {
 
     // Unregister session
     auto pkt = buildEnipHeader(kUnregisterSession, session_, {});
-    try { send(sock_, pkt.data(), pkt.size(), 0); } catch (...) {}
+    try { send(sock_, reinterpret_cast<const char*>(pkt.data()), static_cast<int>(pkt.size()), 0); } catch (...) {}
 
 #ifdef _WIN32
     closesocket(sock_);
@@ -461,7 +496,7 @@ std::vector<uint8_t> EipConnection::recvExact(size_t count) {
     size_t received = 0;
     while (received < count) {
         ssize_t n = recv(sock_, reinterpret_cast<char*>(buf.data() + received),
-                         count - received, 0);
+                         static_cast<int>(count - received), 0);
         if (n <= 0) throw std::runtime_error("Connection closed or recv error");
         received += n;
     }
