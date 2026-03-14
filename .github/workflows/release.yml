@@ -109,7 +109,7 @@ jobs:
             -DPLOTJUGGLER_SRC_DIR="${{ github.workspace }}/PlotJuggler"
           cmake --build build --config Release
 
-      # ── Upload ────────────────────────────────────────────────────────
+      # ── Upload build artifact ─────────────────────────────────────────
 
       - name: Rename artifact
         shell: bash
@@ -124,9 +124,22 @@ jobs:
           name: DataStreamLogixTrend-${{ matrix.platform }}
           path: ${{ env.RELEASE_FILE }}
 
-      - name: Upload to GitHub Release
+  # ── Create release after all builds complete ──────────────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.RELEASE_FILE }}
+          files: artifacts/*
           generate_release_notes: true
-          fail_on_unmatched_files: false
