@@ -7,7 +7,11 @@
 #include <QMessageBox>
 #include <QApplication>
 
+#include <cmath>
+
 namespace logix {
+
+constexpr uint32_t kMaxTrendInstances = 32;
 
 LogixConfigDialog::LogixConfigDialog(QWidget* parent, const LogixConfig* previous)
     : QDialog(parent) {
@@ -123,6 +127,11 @@ void LogixConfigDialog::setupUi() {
 
     main_layout->addLayout(rate_layout);
 
+    // ── RAM Estimate ────────────────────────────────────────────────────
+    ram_label_ = new QLabel();
+    ram_label_->setTextFormat(Qt::RichText);
+    main_layout->addWidget(ram_label_);
+
     // ── Buttons ─────────────────────────────────────────────────────────
     auto* btn_layout = new QHBoxLayout();
     btn_layout->addStretch();
@@ -142,10 +151,15 @@ void LogixConfigDialog::setupUi() {
     connect(cancel_btn_, &QPushButton::clicked, this, &QDialog::reject);
 
     connect(rate_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            [this](int index) {
+            [this](int) {
                 bool is_custom = (rate_combo_->currentData().toUInt() == 0);
                 rate_custom_spin_->setVisible(is_custom);
+                updateRamEstimate();
             });
+    connect(rate_custom_spin_, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &LogixConfigDialog::updateRamEstimate);
+    connect(tag_tree_, &QTreeWidget::itemChanged,
+            this, &LogixConfigDialog::updateRamEstimate);
 }
 
 void LogixConfigDialog::onConnect() {
@@ -376,10 +390,11 @@ void LogixConfigDialog::onAccept() {
         return;
     }
 
-    if (config_.selected_tags.size() > 256) {
+    if (config_.selected_tags.size() > kMaxTrendInstances) {
         QMessageBox::warning(this, "Too Many Tags",
-                             QString("Maximum 256 tags can be trended simultaneously.\n"
-                                     "You selected %1. Please deselect some tags.")
+                             QString("Maximum %1 tags can be trended simultaneously.\n"
+                                     "You selected %2. Please deselect some tags.")
+                                 .arg(kMaxTrendInstances)
                                  .arg(config_.selected_tags.size()));
         return;
     }
@@ -389,12 +404,94 @@ void LogixConfigDialog::onAccept() {
 
     uint32_t rate = rate_combo_->currentData().toUInt();
     if (rate == 0) {
-        // Custom rate
-        rate = static_cast<uint32_t>(rate_custom_spin_->value()) * 1000; // ms to us
+        rate = static_cast<uint32_t>(rate_custom_spin_->value()) * 1000;
     }
     config_.sample_rate_us = rate;
 
+    // Warn if estimated PLC RAM exceeds 50 KB
+    uint32_t conn_size = conn_ ? conn_->connectionSize() : 4002;
+    uint32_t total_ram = 0;
+    for (const auto& [name, data_type] : config_.selected_tags) {
+        total_ram += estimateTagBufferSize(rate, data_type, conn_size) + 164;
+    }
+    if (total_ram > 50 * 1024) {
+        double kb = total_ram / 1024.0;
+        auto reply = QMessageBox::warning(this, "High PLC Memory Usage",
+            QString("Estimated PLC memory: %1 KB (%2 tags).\n"
+                    "This may impact PLCs with limited RAM.\n\nContinue?")
+                .arg(kb, 0, 'f', 1)
+                .arg(config_.selected_tags.size()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (reply != QMessageBox::Yes) return;
+    }
+
     accept();
+}
+
+// ─── RAM Estimate ───────────────────────────────────────────────────────────
+
+uint32_t LogixConfigDialog::estimateTagBufferSize(uint32_t sample_rate_us,
+                                                    uint16_t data_type,
+                                                    uint32_t connection_size) {
+    int value_size = cipTypeSize(data_type);
+    if (value_size == 0) value_size = 4;
+    int sample_size = 6 + value_size;
+
+    // Same formula as computeBufferParams: fill max CIP response
+    uint32_t max_payload = connection_size > 20 ? connection_size - 20 : 480;
+    uint32_t max_samples = max_payload / sample_size;
+    uint32_t buffer_size = max_samples * sample_size;
+    return std::max(buffer_size, static_cast<uint32_t>(sample_size * 4));
+}
+
+void LogixConfigDialog::updateRamEstimate() {
+    uint32_t rate = rate_combo_->currentData().toUInt();
+    if (rate == 0) {
+        rate = static_cast<uint32_t>(rate_custom_spin_->value()) * 1000;
+    }
+    if (rate == 0) rate = 10000;
+
+    uint32_t conn_size = conn_ ? conn_->connectionSize() : 4002;
+
+    uint32_t tag_count = 0;
+    uint32_t total_ram = 0;
+    std::function<void(QTreeWidgetItem*)> walk = [&](QTreeWidgetItem* item) {
+        if ((item->flags() & Qt::ItemIsUserCheckable) &&
+            item->checkState(0) == Qt::Checked) {
+            QString tag_name = item->data(0, Qt::UserRole).toString();
+            uint16_t data_type = item->data(1, Qt::UserRole).toUInt();
+            if (!tag_name.isEmpty() && data_type > 0) {
+                total_ram += estimateTagBufferSize(rate, data_type, conn_size) + 164;
+                tag_count++;
+            }
+        }
+        for (int i = 0; i < item->childCount(); i++) {
+            walk(item->child(i));
+        }
+    };
+    for (int i = 0; i < tag_tree_->topLevelItemCount(); i++) {
+        walk(tag_tree_->topLevelItem(i));
+    }
+
+    if (tag_count == 0) {
+        ram_label_->setText("");
+        return;
+    }
+
+    double kb = total_ram / 1024.0;
+    QString text;
+    if (tag_count > kMaxTrendInstances) {
+        text = QString("<b style='color: red;'>%1/%2 tags (max %2) | PLC Memory: %3 KB</b>")
+                   .arg(tag_count).arg(kMaxTrendInstances).arg(kb, 0, 'f', 1);
+    } else if (total_ram > 50 * 1024) {
+        text = QString("<b style='color: red;'>%1/%2 tags | PLC Memory: %3 KB "
+                        "— exceeds 50 KB limit</b>")
+                   .arg(tag_count).arg(kMaxTrendInstances).arg(kb, 0, 'f', 1);
+    } else {
+        text = QString("%1/%2 tags | PLC Memory: %3 KB")
+                   .arg(tag_count).arg(kMaxTrendInstances).arg(kb, 0, 'f', 1);
+    }
+    ram_label_->setText(text);
 }
 
 } // namespace logix

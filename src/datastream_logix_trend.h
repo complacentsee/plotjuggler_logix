@@ -7,6 +7,7 @@
 #include <PlotJuggler/datastreamer_base.h>
 
 #include <atomic>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -50,11 +51,16 @@ private:
 
     LogixConfig config_;
 
-    // Timestamp tracking: PLC trend timestamps are in CIP Wall Clock
-    // ticks (128 us per tick). We convert to monotonic seconds for PlotJuggler.
-    bool first_sample_ = true;
-    uint32_t base_timestamp_ = 0;
-    double time_offset_s_ = 0.0;
+    // Per-trend timestamp tracking. Each trend has its own PLC timestamp
+    // epoch, so we anchor each to the host clock on first sample.
+    struct TrendTimeState {
+        bool initialized = false;
+        uint32_t base_plc_ts = 0;    // PLC timestamp of first sample
+        double base_host_s = 0.0;    // host time (seconds from start) of first read
+        double last_time_s = -1.0;   // last emitted time for monotonicity
+    };
+    std::map<std::string, TrendTimeState> trend_time_;
+    std::chrono::steady_clock::time_point start_time_;
 };
 
 } // namespace logix

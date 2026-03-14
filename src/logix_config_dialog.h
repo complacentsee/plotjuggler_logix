@@ -42,12 +42,17 @@ private slots:
     void onDeselectAll();
     void onFilterChanged(const QString& text);
     void onAccept();
+    void updateRamEstimate();
 
 private:
     void setupUi();
     void populateTagTree(const std::vector<TagInfo>& tags);
     void applyFilter(const QString& filter);
     void collectSelectedTags();
+
+    /// Estimate PLC buffer bytes for one tag (same formula as computeBufferParams)
+    static uint32_t estimateTagBufferSize(uint32_t sample_rate_us, uint16_t data_type,
+                                           uint32_t connection_size);
 
     // Connection widgets
     QLineEdit* ip_edit_ = nullptr;
@@ -64,6 +69,9 @@ private:
     // Sample rate
     QComboBox* rate_combo_ = nullptr;
     QSpinBox* rate_custom_spin_ = nullptr;
+
+    // RAM estimate
+    QLabel* ram_label_ = nullptr;
 
     // Action buttons
     QPushButton* ok_btn_ = nullptr;

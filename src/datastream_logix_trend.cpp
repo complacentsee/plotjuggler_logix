@@ -2,7 +2,9 @@
 
 #include <QDomDocument>
 #include <QMessageBox>
+#include <QDebug>
 #include <chrono>
+#include <cmath>
 
 namespace logix {
 
@@ -42,8 +44,10 @@ bool DataStreamLogixTrend::start(QStringList* selected_datasources) {
         return false;
     }
 
-    // Create one trend instance per tag
+    // Create one trend instance per tag (PLC limitation: 1 tag per trend in high-speed mode)
     trends_.clear();
+    trend_time_.clear();
+    start_time_ = std::chrono::steady_clock::now();
     poll_interval_ms_ = 200;
     for (const auto& [tag_name, data_type] : config_.selected_tags) {
         try {
@@ -80,10 +84,7 @@ bool DataStreamLogixTrend::start(QStringList* selected_datasources) {
         }
     }
 
-    // Reset timestamp tracking
-    first_sample_ = true;
-    base_timestamp_ = 0;
-    time_offset_s_ = 0.0;
+    // Timestamp tracking initialized per-trend on first sample
 
     // Start polling thread
     running_ = true;
@@ -116,11 +117,17 @@ bool DataStreamLogixTrend::isRunning() const {
 
 void DataStreamLogixTrend::pollingLoop() {
     auto poll_interval = std::chrono::milliseconds(poll_interval_ms_);
+    constexpr double kTickToSeconds = 128.0 / 1e6;
+    int poll_count = 0;
 
     while (running_) {
         bool got_data = false;
+        auto cycle_start = std::chrono::steady_clock::now();
+        double host_now_s = std::chrono::duration<double>(
+            cycle_start - start_time_).count();
 
-        for (auto& trend : trends_) {
+        for (size_t idx = 0; idx < trends_.size(); idx++) {
+            auto& trend = trends_[idx];
             try {
                 auto samples = trend->readData();
 
@@ -128,29 +135,55 @@ void DataStreamLogixTrend::pollingLoop() {
                     std::lock_guard<std::mutex> lock(mutex());
 
                     auto& series = dataMap().getOrCreateNumeric(trend->tagName());
+                    auto& ts = trend_time_[trend->tagName()];
+
+                    int accepted = 0;
+                    int skipped = 0;
 
                     for (const auto& sample : samples) {
-                        constexpr double kTickToSeconds = 128.0 / 1e6;
-                        double time_s;
-                        if (first_sample_) {
-                            base_timestamp_ = sample.timestamp;
-                            first_sample_ = false;
-                            time_s = 0.0;
-                        } else {
-                            uint32_t delta;
-                            if (sample.timestamp >= base_timestamp_) {
-                                delta = sample.timestamp - base_timestamp_;
-                            } else {
-                                delta = (0xFFFFFFFF - base_timestamp_) +
-                                        sample.timestamp + 1;
-                            }
-                            time_s = static_cast<double>(delta) * kTickToSeconds;
+                        if (!ts.initialized) {
+                            // Anchor this trend: PLC timestamp → host time
+                            ts.base_plc_ts = sample.timestamp;
+                            ts.base_host_s = host_now_s;
+                            ts.initialized = true;
                         }
 
-                        series.pushBack({time_s, sample.value});
+                        // Compute time relative to this trend's base,
+                        // then offset to host time axis
+                        uint32_t delta;
+                        if (sample.timestamp >= ts.base_plc_ts) {
+                            delta = sample.timestamp - ts.base_plc_ts;
+                        } else {
+                            delta = (0xFFFFFFFF - ts.base_plc_ts) +
+                                    sample.timestamp + 1;
+                        }
+                        double time_s = ts.base_host_s +
+                                        static_cast<double>(delta) * kTickToSeconds;
+
+                        // Enforce monotonic timestamps — skip FIFO overflow artifacts
+                        if (time_s > ts.last_time_s) {
+                            series.pushBack({time_s, sample.value});
+                            ts.last_time_s = time_s;
+                            accepted++;
+                        } else {
+                            skipped++;
+                        }
+                    }
+
+                    if (poll_count < 3) {
+                        qDebug() << "Poll" << poll_count << "trend" << idx
+                                 << QString::fromStdString(trend->tagName())
+                                 << "samples=" << samples.size()
+                                 << "accepted=" << accepted
+                                 << "skipped=" << skipped
+                                 << "last_t=" << ts.last_time_s;
                     }
 
                     got_data = true;
+                } else if (poll_count < 3) {
+                    qDebug() << "Poll" << poll_count << "trend" << idx
+                             << QString::fromStdString(trend->tagName())
+                             << "samples=0 (empty)";
                 }
             } catch (const std::exception&) {
                 running_ = false;
@@ -158,6 +191,15 @@ void DataStreamLogixTrend::pollingLoop() {
                 return;
             }
         }
+
+        if (poll_count < 3) {
+            auto cycle_end = std::chrono::steady_clock::now();
+            auto cycle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                cycle_end - cycle_start).count();
+            qDebug() << "Poll" << poll_count << "cycle_time=" << cycle_ms << "ms"
+                     << "poll_interval=" << poll_interval_ms_ << "ms";
+        }
+        poll_count++;
 
         if (got_data) {
             emit dataReceived();

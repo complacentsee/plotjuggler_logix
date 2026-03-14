@@ -122,13 +122,13 @@ uint8_t TrendInstance::createTrend(uint32_t buffer_size) {
     uint8_t path_words = static_cast<uint8_t>(path.size() / 2);
 
     // SetAttributeList on create: 2 attrs
-    // attr 8 = buffer size (uint32), attr 3 = num_tags (uint8)
+    // attr 8 = buffer size (UDINT), attr 3 = num_tags (USINT)
     std::vector<uint8_t> data;
     appendU16(data, 2);  // 2 attributes
     appendU16(data, 8);  // attr 8: buffer size
     appendU32(data, buffer_size);
     appendU16(data, 3);  // attr 3: num tags
-    appendU8(data, 1);   // 1 tag per trend
+    appendU8(data, 1);   // 1 tag per trend (PLC limitation)
 
     std::vector<uint8_t> msg;
     appendU8(msg, 0x08); // Create service
@@ -175,7 +175,7 @@ uint8_t TrendInstance::addTag() {
     uint8_t sym_path_words = static_cast<uint8_t>(sym_path.size() / 2);
 
     std::vector<uint8_t> data;
-    appendU16(data, 1);  // 1 tag
+    appendU16(data, 1);  // constant
     appendU8(data, 1);   // tag_index
     appendU8(data, 1);   // type
     appendU8(data, sym_path_words); // path size in words

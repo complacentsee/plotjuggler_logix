@@ -16,7 +16,7 @@ struct TrendSample {
 };
 
 /// Manages a single CIP trend instance on the PLC (class 0xB2).
-/// One tag per trend instance.
+/// One tag per trend instance (PLC limitation in high-speed trend mode).
 class TrendInstance {
 public:
     TrendInstance(EipConnection& conn, const std::string& tag_name, uint16_t data_type);
