@@ -61,8 +61,8 @@ private:
   void applyFilter(const QString& filter);
   void collectSelectedTags();
 
-  /// Estimate PLC buffer bytes for one tag (same formula as computeBufferParams)
-  static uint32_t estimateTagBufferSize(uint32_t sample_rate_us, uint16_t data_type,
+  /// Estimate PLC buffer bytes for one trend instance with num_tags tags
+  static uint32_t estimateTagBufferSize(uint32_t sample_rate_us, size_t num_tags,
                                         uint32_t connection_size);
 
   // Connection widgets

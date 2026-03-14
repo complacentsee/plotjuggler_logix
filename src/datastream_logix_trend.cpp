@@ -11,6 +11,7 @@
 #include <QDebug>
 #include <chrono>
 #include <cmath>
+#include <algorithm>
 
 namespace logix
 {
@@ -60,19 +61,44 @@ bool DataStreamLogixTrend::start(QStringList* selected_datasources)
     return false;
   }
 
-  // Create one trend instance per tag (PLC limitation: 1 tag per trend in high-speed mode)
+  // Group tags into multi-tag trend instances
   trends_.clear();
   trend_time_.clear();
   start_time_ = std::chrono::steady_clock::now();
   poll_interval_ms_ = 200;
-  for (const auto& [tag_name, data_type] : config_.selected_tags)
+
+  size_t max_tags = maxTagsPerInstance(config_.sample_rate_us, conn_->connectionSize());
+  size_t total_tags = config_.selected_tags.size();
+  size_t num_instances = (total_tags + max_tags - 1) / max_tags;
+  // Balance tags evenly across instances (e.g., 7-7-7 instead of 9-9-3)
+  size_t tags_per_inst = (total_tags + num_instances - 1) / num_instances;
+
+  qDebug() << "Trend: connection_size=" << conn_->connectionSize()
+           << "max_tags_per_instance=" << max_tags
+           << "balanced_tags_per_instance=" << tags_per_inst
+           << "instances=" << num_instances
+           << "total_tags=" << total_tags;
+
+  size_t tag_offset = 0;
+  for (size_t inst = 0; inst < num_instances; inst++)
   {
+    // Read all running instances to prevent FIFO overflow during setup
+    for (auto& existing : trends_)
+    {
+      existing->readData();
+    }
+
+    size_t chunk_size = std::min(tags_per_inst, total_tags - tag_offset);
+    std::vector<std::pair<std::string, uint16_t>> chunk(
+        config_.selected_tags.begin() + tag_offset,
+        config_.selected_tags.begin() + tag_offset + chunk_size);
+    tag_offset += chunk_size;
+
     try
     {
-      auto trend = std::make_unique<TrendInstance>(*conn_, tag_name, data_type);
-      int sample_size = trend->sampleSize();
+      auto trend = std::make_unique<TrendInstance>(*conn_, chunk);
       auto [buf_size, poll_ms] =
-          computeBufferParams(config_.sample_rate_us, sample_size, conn_->connectionSize());
+          computeBufferParams(config_.sample_rate_us, 10, chunk.size(), conn_->connectionSize());
       poll_interval_ms_ = std::min(poll_interval_ms_, poll_ms);
       trend->start(config_.sample_rate_us, buf_size);
       trends_.push_back(std::move(trend));
@@ -80,8 +106,8 @@ bool DataStreamLogixTrend::start(QStringList* selected_datasources)
     catch (const std::exception& e)
     {
       QMessageBox::critical(nullptr, "Trend Error",
-                            QString("Failed to start trend for '%1':\n%2")
-                                .arg(QString::fromStdString(tag_name))
+                            QString("Failed to start trend instance %1:\n%2")
+                                .arg(trends_.size())
                                 .arg(e.what()));
       trends_.clear();
       conn_->close();
@@ -98,16 +124,50 @@ bool DataStreamLogixTrend::start(QStringList* selected_datasources)
     return false;
   }
 
+  // Recompute poll interval accounting for CIP read overhead of all instances.
+  // Each instance read takes ~7ms. Total cycle = sleep + N × read_time.
+  // Buffer fill_time must exceed total cycle time.
+  {
+    constexpr uint32_t kReadTimePerInstance = 7;  // ms, estimated CIP round-trip
+    uint32_t estimated_cycle_ms = static_cast<uint32_t>(trends_.size()) * kReadTimePerInstance;
+    uint32_t max_entries = (conn_->connectionSize() > 20 ? conn_->connectionSize() - 20 : 480) / 10;
+
+    // Find the tightest instance (most tags = fastest fill)
+    size_t max_tags_in_any = 0;
+    for (const auto& t : trends_)
+    {
+      max_tags_in_any = std::max(max_tags_in_any, t->numTags());
+    }
+
+    uint32_t periods = max_entries / static_cast<uint32_t>(max_tags_in_any);
+    double fill_ms = periods * (config_.sample_rate_us / 1000.0);
+
+    // sleep = (fill_time - cycle_overhead) / 2, so total ≈ fill_time × 0.75
+    double available_ms = fill_ms - estimated_cycle_ms;
+    if (available_ms > 0)
+    {
+      poll_interval_ms_ = std::max(5u, static_cast<uint32_t>(available_ms / 2.0));
+    }
+    else
+    {
+      poll_interval_ms_ = 5;  // minimum — bandwidth is very tight
+    }
+    poll_interval_ms_ = std::min(200u, poll_interval_ms_);
+  }
+
+  qDebug() << "Trend: created" << trends_.size() << "instances, poll_interval=" << poll_interval_ms_ << "ms";
+
   // Populate selected_datasources for PlotJuggler
   if (selected_datasources)
   {
     for (const auto& trend : trends_)
     {
-      selected_datasources->append(QString::fromStdString(trend->tagName()));
+      for (const auto& tag : trend->tags())
+      {
+        selected_datasources->append(QString::fromStdString(tag.name));
+      }
     }
   }
-
-  // Timestamp tracking initialized per-trend on first sample
 
   // Start polling thread
   running_ = true;
@@ -129,7 +189,7 @@ void DataStreamLogixTrend::shutdown()
     poll_thread_.join();
   }
 
-  // Stop all trend instances (stop → remove tag → delete)
+  // Stop all trend instances (stop → remove tags → delete)
   trends_.clear();
 
   // Close connection
@@ -168,23 +228,24 @@ void DataStreamLogixTrend::pollingLoop()
         {
           std::lock_guard<std::mutex> lock(mutex());
 
-          auto& series = dataMap().getOrCreateNumeric(trend->tagName());
-          auto& ts = trend_time_[trend->tagName()];
-
           int accepted = 0;
           int skipped = 0;
 
           for (const auto& sample : samples)
           {
+            const auto& tag = trend->tags()[sample.tag_index];
+            auto& series = dataMap().getOrCreateNumeric(tag.name);
+            auto& ts = trend_time_[tag.name];
+
             if (!ts.initialized)
             {
-              // Anchor this trend: PLC timestamp → host time
+              // Anchor this tag: PLC timestamp → host time
               ts.base_plc_ts = sample.timestamp;
               ts.base_host_s = host_now_s;
               ts.initialized = true;
             }
 
-            // Compute time relative to this trend's base,
+            // Compute time relative to this tag's base,
             // then offset to host time axis
             uint32_t delta;
             if (sample.timestamp >= ts.base_plc_ts)
@@ -197,7 +258,7 @@ void DataStreamLogixTrend::pollingLoop()
             }
             double time_s = ts.base_host_s + static_cast<double>(delta) * kTickToSeconds;
 
-            // Enforce monotonic timestamps — skip FIFO overflow artifacts
+            // Enforce monotonic timestamps — skip already-seen entries
             if (time_s > ts.last_time_s)
             {
               series.pushBack({ time_s, sample.value });
@@ -210,20 +271,19 @@ void DataStreamLogixTrend::pollingLoop()
             }
           }
 
-          if (poll_count < 3)
+          if (poll_count < 5)
           {
             qDebug() << "Poll" << poll_count << "trend" << idx
-                     << QString::fromStdString(trend->tagName()) << "samples=" << samples.size()
-                     << "accepted=" << accepted << "skipped=" << skipped
-                     << "last_t=" << ts.last_time_s;
+                     << "tags=" << trend->numTags()
+                     << "samples=" << samples.size()
+                     << "accepted=" << accepted << "skipped=" << skipped;
           }
 
           got_data = true;
         }
         else if (poll_count < 3)
         {
-          qDebug() << "Poll" << poll_count << "trend" << idx
-                   << QString::fromStdString(trend->tagName()) << "samples=0 (empty)";
+          qDebug() << "Poll" << poll_count << "trend" << idx << "samples=0 (empty)";
         }
       }
       catch (const std::exception&)
@@ -255,24 +315,44 @@ void DataStreamLogixTrend::pollingLoop()
 
 // ─── Buffer Sizing ──────────────────────────────────────────────────────────
 
+size_t DataStreamLogixTrend::maxTagsPerInstance(uint32_t sample_rate_us, uint32_t connection_size,
+                                                uint32_t min_fill_time_ms)
+{
+  uint32_t max_payload = connection_size > 20 ? connection_size - 20 : 480;
+  size_t max_entries = max_payload / 10;  // 10 bytes per entry
+  double sample_rate_ms = sample_rate_us / 1000.0;
+
+  // fill_time = (max_entries / num_tags) * sample_rate_ms
+  // We need fill_time >= min_fill_time_ms (must be > 2× CIP round-trip)
+  // → num_tags <= max_entries * sample_rate_ms / min_fill_time_ms
+  size_t max_tags_fill = static_cast<size_t>(max_entries * sample_rate_ms / min_fill_time_ms);
+
+  // Also cap at max_entries / 4 to ensure at least 4 periods per read
+  size_t max_tags_periods = max_entries / 4;
+
+  size_t max_tags = std::min(max_tags_fill, max_tags_periods);
+  return std::max(static_cast<size_t>(1), max_tags);
+}
+
 std::pair<uint32_t, uint32_t> DataStreamLogixTrend::computeBufferParams(uint32_t sample_rate_us,
                                                                         int sample_size,
+                                                                        size_t num_tags,
                                                                         uint32_t connection_size)
 {
   // Size the buffer to fit within a single CIP response.
-  // Leave headroom for CIP headers (~20 bytes).
+  // One read drains the buffer completely — no backlog buildup.
   uint32_t max_payload = connection_size > 20 ? connection_size - 20 : 480;
-  uint32_t max_samples = max_payload / sample_size;
-  uint32_t buffer_size = max_samples * sample_size;
-  buffer_size = std::max(buffer_size, static_cast<uint32_t>(sample_size * 4));
+  uint32_t max_entries = max_payload / sample_size;
+  uint32_t buffer_size = max_entries * sample_size;
 
   // Poll interval: drain before buffer fills (50% safety margin)
-  uint32_t capacity = buffer_size / sample_size;
-  double fill_time_ms = capacity * (sample_rate_us / 1000.0);
+  uint32_t n_tags = num_tags > 0 ? static_cast<uint32_t>(num_tags) : 1;
+  uint32_t periods = max_entries / n_tags;
+  double fill_time_ms = periods * (sample_rate_us / 1000.0);
   uint32_t poll_ms = static_cast<uint32_t>(fill_time_ms / 2.0);
 
-  // Clamp poll interval: min 20ms, max 200ms
-  poll_ms = std::max(20u, std::min(200u, poll_ms));
+  // Clamp poll interval: min 5ms, max 200ms
+  poll_ms = std::max(5u, std::min(200u, poll_ms));
 
   return { buffer_size, poll_ms };
 }

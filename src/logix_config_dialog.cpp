@@ -5,6 +5,7 @@
  */
 
 #include "logix_config_dialog.h"
+#include "datastream_logix_trend.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -18,7 +19,7 @@
 namespace logix
 {
 
-constexpr uint32_t kMaxTrendInstances = 32;
+constexpr uint32_t kMaxTags = 256;
 
 LogixConfigDialog::LogixConfigDialog(QWidget* parent, const LogixConfig* previous) : QDialog(parent)
 {
@@ -440,12 +441,12 @@ void LogixConfigDialog::onAccept()
     return;
   }
 
-  if (config_.selected_tags.size() > kMaxTrendInstances)
+  if (config_.selected_tags.size() > kMaxTags)
   {
     QMessageBox::warning(this, "Too Many Tags",
                          QString("Maximum %1 tags can be trended simultaneously.\n"
                                  "You selected %2. Please deselect some tags.")
-                             .arg(kMaxTrendInstances)
+                             .arg(kMaxTags)
                              .arg(config_.selected_tags.size()));
     return;
   }
@@ -462,11 +463,10 @@ void LogixConfigDialog::onAccept()
 
   // Warn if estimated PLC RAM exceeds 50 KB
   uint32_t conn_size = conn_ ? conn_->connectionSize() : 4002;
-  uint32_t total_ram = 0;
-  for (const auto& [name, data_type] : config_.selected_tags)
-  {
-    total_ram += estimateTagBufferSize(rate, data_type, conn_size) + 164;
-  }
+  size_t tags_per_inst = DataStreamLogixTrend::maxTagsPerInstance(rate, conn_size);
+  size_t num_instances = (config_.selected_tags.size() + tags_per_inst - 1) / tags_per_inst;
+  uint32_t per_instance_buf = estimateTagBufferSize(rate, tags_per_inst, conn_size);
+  uint32_t total_ram = static_cast<uint32_t>(num_instances) * (per_instance_buf + 164);
   if (total_ram > 50 * 1024)
   {
     double kb = total_ram / 1024.0;
@@ -487,21 +487,15 @@ void LogixConfigDialog::onAccept()
 
 // ─── RAM Estimate ───────────────────────────────────────────────────────────
 
-uint32_t LogixConfigDialog::estimateTagBufferSize(uint32_t sample_rate_us, uint16_t data_type,
+uint32_t LogixConfigDialog::estimateTagBufferSize(uint32_t sample_rate_us, size_t num_tags,
                                                   uint32_t connection_size)
 {
-  int value_size = cipTypeSize(data_type);
-  if (value_size == 0)
-  {
-    value_size = 4;
-  }
-  int sample_size = 6 + value_size;
+  constexpr int sample_size = 10;  // Fixed 10-byte entries in multi-tag mode
 
-  // Same formula as computeBufferParams: fill max CIP response
+  // Buffer = one CIP response worth (one read drains completely)
   uint32_t max_payload = connection_size > 20 ? connection_size - 20 : 480;
-  uint32_t max_samples = max_payload / sample_size;
-  uint32_t buffer_size = max_samples * sample_size;
-  return std::max(buffer_size, static_cast<uint32_t>(sample_size * 4));
+  uint32_t max_entries = max_payload / sample_size;
+  return max_entries * sample_size;
 }
 
 void LogixConfigDialog::updateRamEstimate()
@@ -519,7 +513,6 @@ void LogixConfigDialog::updateRamEstimate()
   uint32_t conn_size = conn_ ? conn_->connectionSize() : 4002;
 
   uint32_t tag_count = 0;
-  uint32_t total_ram = 0;
   std::function<void(QTreeWidgetItem*)> walk = [&](QTreeWidgetItem* item) {
     if ((item->flags() & Qt::ItemIsUserCheckable) && item->checkState(0) == Qt::Checked)
     {
@@ -527,7 +520,6 @@ void LogixConfigDialog::updateRamEstimate()
       uint16_t data_type = item->data(1, Qt::UserRole).toUInt();
       if (!tag_name.isEmpty() && data_type > 0)
       {
-        total_ram += estimateTagBufferSize(rate, data_type, conn_size) + 164;
         tag_count++;
       }
     }
@@ -547,28 +539,51 @@ void LogixConfigDialog::updateRamEstimate()
     return;
   }
 
+  // Compute grouping, poll rate, and RAM estimate
+  size_t tags_per_inst = DataStreamLogixTrend::maxTagsPerInstance(rate, conn_size);
+  size_t num_instances = (tag_count + tags_per_inst - 1) / tags_per_inst;
+  uint32_t per_instance_buf = estimateTagBufferSize(rate, tags_per_inst, conn_size);
+  uint32_t total_ram = static_cast<uint32_t>(num_instances) * (per_instance_buf + 164);
   double kb = total_ram / 1024.0;
+
+  // Compute poll interval accounting for CIP read overhead of all instances
+  constexpr uint32_t kReadTimePerInstance = 7;  // ms, estimated CIP round-trip
+  uint32_t max_payload = conn_size > 20 ? conn_size - 20 : 480;
+  uint32_t max_entries = max_payload / 10;
+  uint32_t n_tags = tags_per_inst > 0 ? static_cast<uint32_t>(tags_per_inst) : 1;
+  uint32_t periods = max_entries / n_tags;
+  double fill_time_ms = periods * (rate / 1000.0);
+  double estimated_cycle_ms = num_instances * kReadTimePerInstance;
+  double available_ms = fill_time_ms - estimated_cycle_ms;
+  uint32_t poll_ms = available_ms > 0 ? static_cast<uint32_t>(available_ms / 2.0) : 5;
+  poll_ms = std::max(5u, std::min(200u, poll_ms));
+
   QString text;
-  if (tag_count > kMaxTrendInstances)
+  if (tag_count > kMaxTags)
   {
-    text = QString("<b style='color: red;'>%1/%2 tags (max %2) | PLC Memory: %3 KB</b>")
+    text = QString("<b style='color: red;'>%1 tags (max %2) in %3 instances | "
+                   "Poll: %4 ms | PLC Memory: %5 KB</b>")
                .arg(tag_count)
-               .arg(kMaxTrendInstances)
+               .arg(kMaxTags)
+               .arg(num_instances)
+               .arg(poll_ms)
                .arg(kb, 0, 'f', 1);
   }
   else if (total_ram > 50 * 1024)
   {
-    text = QString("<b style='color: red;'>%1/%2 tags | PLC Memory: %3 KB "
-                   "— exceeds 50 KB limit</b>")
+    text = QString("<b style='color: red;'>%1 tags in %2 instances | "
+                   "Poll: %3 ms | PLC Memory: %4 KB — exceeds 50 KB limit</b>")
                .arg(tag_count)
-               .arg(kMaxTrendInstances)
+               .arg(num_instances)
+               .arg(poll_ms)
                .arg(kb, 0, 'f', 1);
   }
   else
   {
-    text = QString("%1/%2 tags | PLC Memory: %3 KB")
+    text = QString("%1 tags in %2 instances | Poll: %3 ms | PLC Memory: %4 KB")
                .arg(tag_count)
-               .arg(kMaxTrendInstances)
+               .arg(num_instances)
+               .arg(poll_ms)
                .arg(kb, 0, 'f', 1);
   }
   ram_label_->setText(text);

@@ -44,12 +44,18 @@ public:
   bool xmlSaveState(QDomDocument& doc, QDomElement& parent_element) const override;
   bool xmlLoadState(const QDomElement& parent_element) override;
 
+  /// Compute how many tags fit in one trend instance while ensuring
+  /// the buffer doesn't overflow between polls.
+  static size_t maxTagsPerInstance(uint32_t sample_rate_us, uint32_t connection_size,
+                                   uint32_t min_fill_time_ms = 40);
+
 private:
   void pollingLoop();
 
-  // Compute buffer size and poll interval.
+  // Compute buffer size and poll interval for a multi-tag trend instance.
   // Returns {buffer_size_bytes, poll_interval_ms}.
   static std::pair<uint32_t, uint32_t> computeBufferParams(uint32_t sample_rate_us, int sample_size,
+                                                           size_t num_tags,
                                                            uint32_t connection_size);
 
   std::atomic<bool> running_{ false };
@@ -61,7 +67,7 @@ private:
 
   LogixConfig config_;
 
-  // Per-trend timestamp tracking. Each trend has its own PLC timestamp
+  // Per-tag timestamp tracking. Each tag has its own PLC timestamp
   // epoch, so we anchor each to the host clock on first sample.
   struct TrendTimeState
   {
