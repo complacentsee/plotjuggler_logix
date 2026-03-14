@@ -51,6 +51,7 @@ target_link_libraries(DataStreamLogixTrend PRIVATE
 
 if(WIN32)
     target_link_libraries(DataStreamLogixTrend PRIVATE ws2_32)
+    target_compile_definitions(DataStreamLogixTrend PRIVATE NOMINMAX)
 endif()
 
 if(plotjuggler_FOUND)
