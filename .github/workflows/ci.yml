@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PJ_VERSION: '3.16.0'
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x64
+          - os: macos-14
+            platform: macos-arm64
+          - os: macos-14
+            platform: macos-x64
+          - os: windows-latest
+            platform: windows-x64
+
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+
+      - name: Checkout PlotJuggler
+        uses: actions/checkout@v4
+        with:
+          repository: facontidavide/PlotJuggler
+          ref: ${{ env.PJ_VERSION }}
+          path: PlotJuggler
+
+      # ── Qt setup ──────────────────────────────────────────────────────
+
+      - name: Install Qt (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qtbase5-dev libqt5svg5-dev libqt5xml5-dev
+
+      - name: Install Qt (macOS)
+        if: runner.os == 'macOS'
+        uses: tecolicom/actions-use-homebrew-tools@v1
+        with:
+          tools: qt@5
+          cache: yes
+
+      - name: Install Qt (Windows)
+        if: runner.os == 'Windows'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '5.15.2'
+          arch: 'win64_msvc2019_64'
+          cache: 'true'
+
+      # ── Build PlotJuggler (minimal) ───────────────────────────────────
+
+      - name: Build PlotJuggler (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_PREFIX_PATH=$(brew --prefix qt@5)"
+          fi
+          cmake -S PlotJuggler -B PlotJuggler/build $CMAKE_ARGS
+          cmake --build PlotJuggler/build --target plotjuggler_base plotjuggler_qwt fmt
+
+      - name: Build PlotJuggler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S PlotJuggler -B PlotJuggler/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build PlotJuggler/build --config Release --target plotjuggler_base plotjuggler_qwt fmt
+
+      # ── Build plugin ──────────────────────────────────────────────────
+
+      - name: Build plugin (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release -DPLOTJUGGLER_SRC_DIR=${{ github.workspace }}/PlotJuggler"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_PREFIX_PATH=$(brew --prefix qt@5)"
+          fi
+          cmake -S . -B build $CMAKE_ARGS
+          cmake --build build
+
+      - name: Build plugin (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release `
+            -DPLOTJUGGLER_SRC_DIR="${{ github.workspace }}/PlotJuggler" `
+            -DPLOTJUGGLER_BUILD_DIR="${{ github.workspace }}/PlotJuggler/build/Release"
+          cmake --build build --config Release
+
+      # ── Verify ────────────────────────────────────────────────────────
+
+      - name: Verify build output
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ls -la build/Release/DataStreamLogixTrend.dll
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            ls -la build/libDataStreamLogixTrend.dylib
+          else
+            ls -la build/libDataStreamLogixTrend.so
+          fi

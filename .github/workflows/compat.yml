@@ -1,0 +1,40 @@
+name: Compatibility Check
+
+on:
+  schedule:
+    - cron: '0 6 * * 0'  # Sunday 6am UTC
+  workflow_dispatch:
+
+jobs:
+  build-against-pj-main:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+
+      - name: Checkout PlotJuggler (main)
+        uses: actions/checkout@v4
+        with:
+          repository: facontidavide/PlotJuggler
+          ref: main
+          path: PlotJuggler
+
+      - name: Install Qt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qtbase5-dev libqt5svg5-dev libqt5xml5-dev
+
+      - name: Build PlotJuggler
+        run: |
+          cmake -S PlotJuggler -B PlotJuggler/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build PlotJuggler/build --target plotjuggler_base plotjuggler_qwt fmt
+
+      - name: Build plugin
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DPLOTJUGGLER_SRC_DIR=${{ github.workspace }}/PlotJuggler
+          cmake --build build
+
+      - name: Verify build output
+        run: ls -la build/libDataStreamLogixTrend.so
