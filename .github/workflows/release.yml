@@ -106,12 +106,6 @@ jobs:
             -DPLOTJUGGLER_SRC_DIR="${{ github.workspace }}/PlotJuggler"
           cmake --build build --config Release
 
-      # ── Sign (macOS) ──────────────────────────────────────────────────
-
-      - name: Ad-hoc codesign (macOS)
-        if: runner.os == 'macOS'
-        run: codesign --force --sign - build/libDataStreamLogixTrend.dylib
-
       # ── Upload ────────────────────────────────────────────────────────
 
       - name: Rename artifact
