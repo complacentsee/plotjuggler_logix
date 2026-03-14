@@ -62,10 +62,16 @@ else()
         ${PLOTJUGGLER_SRC_DIR}/3rdparty/qwt/src
         ${PLOTJUGGLER_SRC_DIR}/3rdparty/sol2-3.5.0/include
     )
+    # MSVC multi-config generators put output in per-target Release/ subdirs
+    if(MSVC)
+        set(_PJ_CFG "/Release")
+    else()
+        set(_PJ_CFG "")
+    endif()
     target_link_libraries(DataStreamLogixTrend PRIVATE
-        ${PLOTJUGGLER_BUILD_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}plotjuggler_base${CMAKE_STATIC_LIBRARY_SUFFIX}
-        ${PLOTJUGGLER_BUILD_DIR}/3rdparty/qwt/src/${CMAKE_STATIC_LIBRARY_PREFIX}plotjuggler_qwt${CMAKE_STATIC_LIBRARY_SUFFIX}
-        ${PLOTJUGGLER_BUILD_DIR}/_deps/fmt-build/${CMAKE_STATIC_LIBRARY_PREFIX}fmt${CMAKE_STATIC_LIBRARY_SUFFIX}
+        ${PLOTJUGGLER_BUILD_DIR}${_PJ_CFG}/${CMAKE_STATIC_LIBRARY_PREFIX}plotjuggler_base${CMAKE_STATIC_LIBRARY_SUFFIX}
+        ${PLOTJUGGLER_BUILD_DIR}/3rdparty/qwt/src${_PJ_CFG}/${CMAKE_STATIC_LIBRARY_PREFIX}plotjuggler_qwt${CMAKE_STATIC_LIBRARY_SUFFIX}
+        ${PLOTJUGGLER_BUILD_DIR}/_deps/fmt-build${_PJ_CFG}/${CMAKE_STATIC_LIBRARY_PREFIX}fmt${CMAKE_STATIC_LIBRARY_SUFFIX}
     )
     # PlotJuggler version defines needed by headers
     target_compile_definitions(DataStreamLogixTrend PRIVATE

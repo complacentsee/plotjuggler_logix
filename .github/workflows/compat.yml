@@ -11,10 +11,10 @@ jobs:
 
     steps:
       - name: Checkout plugin
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Checkout PlotJuggler (main)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: facontidavide/PlotJuggler
           ref: main
@@ -23,7 +23,8 @@ jobs:
       - name: Install Qt
         run: |
           sudo apt-get update
-          sudo apt-get install -y qtbase5-dev libqt5svg5-dev
+          sudo apt-get install -y qtbase5-dev libqt5svg5-dev libqt5websockets5-dev \
+            libqt5serialport5-dev libqt5opengl5-dev libqt5x11extras5-dev
 
       - name: Build PlotJuggler
         run: |
