@@ -35,11 +35,11 @@ public:
 private:
     void pollingLoop();
 
-    // Compute buffer size and poll interval to prevent overflow.
-    // sample_size = bytes per sample record (6 + value size).
+    // Compute buffer size and poll interval.
     // Returns {buffer_size_bytes, poll_interval_ms}.
     static std::pair<uint32_t, uint32_t> computeBufferParams(uint32_t sample_rate_us,
-                                                              int sample_size);
+                                                              int sample_size,
+                                                              uint32_t connection_size);
 
     std::atomic<bool> running_{false};
     uint32_t poll_interval_ms_ = 200;

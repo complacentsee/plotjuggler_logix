@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <set>
+
+#include <QDebug>
 
 namespace logix {
 
@@ -37,7 +40,9 @@ std::string TagBrowser::lookupTypeName(uint16_t symbol_type, uint16_t data_type_
     auto it = udts_.find(data_type_value);
     if (it != udts_.end()) return it->second.name;
 
-    return "UNKNOWN(0x" + std::to_string(data_type_value) + ")";
+    char buf[32];
+    snprintf(buf, sizeof(buf), "UNKNOWN(0x%03X)", data_type_value);
+    return buf;
 }
 
 // ─── Tag List Request (Service 0x55) ────────────────────────────────────────
@@ -286,7 +291,12 @@ void TagBrowser::resolveUdts(EipConnection& conn, const std::vector<TagInfo>& ta
                 // Get template attribute to determine size and member count
                 auto attr_resp = getTemplateAttribute(conn, type_id);
                 auto attr_cip = parseCipStatus(attr_resp);
-                if (attr_cip.status != 0 || attr_cip.data.size() < 20) continue;
+                if (attr_cip.status != 0 || attr_cip.data.size() < 20) {
+                    qDebug() << "UDT resolve: template" << type_id
+                             << "attr request failed, status=" << attr_cip.status
+                             << "data_size=" << attr_cip.data.size();
+                    continue;
+                }
 
                 // Parse: attr4 status(2) + handle(4), attr3 status(2) + member_count...
                 // The response format includes status words for each attribute
@@ -300,6 +310,11 @@ void TagBrowser::resolveUdts(EipConnection& conn, const std::vector<TagInfo>& ta
 
                 // Parse attribute responses
                 // Each attr response: attr_id(2) + status(2) + data
+                // Attribute data sizes for class 0x6C (Template):
+                //   Attr 4: Object Definition Size (UDINT, 4 bytes)
+                //   Attr 3: Member Description Structure Definition Size (UINT, 2 bytes)
+                //   Attr 2: Member Count (UINT, 2 bytes)
+                //   Attr 1: Structure Handle / CRC (UINT, 2 bytes)
                 size_t pos = 0;
                 auto& d = attr_cip.data;
                 // Attr count first
@@ -316,25 +331,24 @@ void TagBrowser::resolveUdts(EipConnection& conn, const std::vector<TagInfo>& ta
                     if (attr_status != 0) continue;
 
                     switch (attr_id) {
-                        case 4: // Object Definition Size
+                        case 4: // Object Definition Size (UDINT, 4 bytes)
                             if (pos + 4 <= d.size()) {
                                 obj_def_size = readU32(&d[pos]);
                                 pos += 4;
                             }
                             break;
-                        case 3: // Template member count (includes hidden members)
+                        case 3: // Member Description Structure Definition Size (UINT, 2 bytes)
                             if (pos + 2 <= d.size()) {
-                                // This is the structure handle, not member count
-                                pos += 4; // handle is 4 bytes
+                                pos += 2;
                             }
                             break;
-                        case 2: // Member count
+                        case 2: // Member Count (UINT, 2 bytes)
                             if (pos + 2 <= d.size()) {
                                 member_count = readU16(&d[pos]);
                                 pos += 2;
                             }
                             break;
-                        case 1: // Structure handle
+                        case 1: // Structure Handle (UINT, 2 bytes)
                             if (pos + 2 <= d.size()) {
                                 pos += 2;
                             }
@@ -342,7 +356,19 @@ void TagBrowser::resolveUdts(EipConnection& conn, const std::vector<TagInfo>& ta
                     }
                 }
 
-                if (obj_def_size == 0 || member_count == 0) continue;
+                qDebug() << "UDT resolve: template" << type_id
+                         << "obj_def_size=" << obj_def_size
+                         << "member_count=" << member_count;
+
+                if (obj_def_size == 0 || member_count == 0) {
+                    // Dump raw response bytes for diagnostics
+                    QString hex;
+                    for (size_t i = 0; i < d.size() && i < 40; i++) {
+                        hex += QString("%1 ").arg(d[i], 2, 16, QChar('0'));
+                    }
+                    qDebug() << "  raw attr data (" << d.size() << "bytes):" << hex;
+                    continue;
+                }
 
                 // Calculate template data size (from pylogix)
                 int words = static_cast<int>(obj_def_size * 4) - 23;
@@ -350,7 +376,11 @@ void TagBrowser::resolveUdts(EipConnection& conn, const std::vector<TagInfo>& ta
 
                 // Get full template
                 auto tmpl_data = getTemplate(conn, type_id, size);
-                if (tmpl_data.empty()) continue;
+                if (tmpl_data.empty()) {
+                    qDebug() << "UDT resolve: template" << type_id
+                             << "readTemplate returned empty (requested" << size << "bytes)";
+                    continue;
+                }
 
                 // Parse template: member definitions (8 bytes each) followed by name strings
                 UdtDef udt;
@@ -415,8 +445,9 @@ void TagBrowser::resolveUdts(EipConnection& conn, const std::vector<TagInfo>& ta
 
                 udts_[type_id] = udt;
 
-            } catch (const std::exception&) {
-                // Skip types we can't resolve
+            } catch (const std::exception& e) {
+                qDebug() << "UDT resolve: template" << type_id
+                         << "exception:" << e.what();
                 continue;
             }
         }

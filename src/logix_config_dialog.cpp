@@ -201,8 +201,9 @@ void LogixConfigDialog::populateTagTree(const std::vector<TagInfo>& tags) {
         if (program_items.find(group) == program_items.end()) {
             auto* group_item = new QTreeWidgetItem(tag_tree_);
             group_item->setText(0, QString::fromStdString(group));
-            group_item->setFlags(group_item->flags() | Qt::ItemIsAutoTristate);
-            group_item->setExpanded(group == "Controller Tags");
+            group_item->setFlags(group_item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsAutoTristate);
+            group_item->setCheckState(0, Qt::Unchecked);
+            group_item->setExpanded(false);
             program_items[group] = group_item;
         }
 
@@ -213,7 +214,8 @@ void LogixConfigDialog::populateTagTree(const std::vector<TagInfo>& tags) {
             auto* struct_item = new QTreeWidgetItem(parent);
             struct_item->setText(0, QString::fromStdString(display_name));
             struct_item->setText(1, QString::fromStdString(tag.data_type_name));
-            struct_item->setFlags(struct_item->flags() | Qt::ItemIsAutoTristate);
+            struct_item->setFlags(struct_item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsAutoTristate);
+            struct_item->setCheckState(0, Qt::Unchecked);
 
             // Add numeric members as checkable children
             auto members = browser_.expandStructMembers(tag);
@@ -246,7 +248,8 @@ void LogixConfigDialog::populateTagTree(const std::vector<TagInfo>& tags) {
                 array_item->setText(0, QString::fromStdString(display_name));
                 array_item->setText(1, QString::fromStdString(tag.data_type_name));
                 array_item->setText(2, QString("[%1]").arg(tag.array_size));
-                array_item->setFlags(array_item->flags() | Qt::ItemIsAutoTristate);
+                array_item->setFlags(array_item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsAutoTristate);
+                array_item->setCheckState(0, Qt::Unchecked);
 
                 int max_elements = std::min(tag.array_size, 64);
                 for (int i = 0; i < max_elements; i++) {

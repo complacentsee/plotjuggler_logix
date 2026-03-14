@@ -7,6 +7,8 @@
 #include <sstream>
 #include <thread>
 
+#include <QDebug>
+
 #ifdef _WIN32
 namespace {
 struct WinsockInit {
@@ -255,9 +257,54 @@ void EipConnection::connect(const std::string& ip,
         throw std::runtime_error("Invalid IP address: " + ip);
     }
 
-    if (::connect(sock_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
-        throw std::runtime_error("Failed to connect to " + ip + ":" + std::to_string(kEnipPort));
+    // Non-blocking connect with timeout to avoid freezing UI on offline hosts
+#ifdef _WIN32
+    u_long nonblock = 1;
+    ioctlsocket(sock_, FIONBIO, &nonblock);
+#else
+    int flags = fcntl(sock_, F_GETFL, 0);
+    fcntl(sock_, F_SETFL, flags | O_NONBLOCK);
+#endif
+
+    int rc = ::connect(sock_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+    if (rc != 0) {
+#ifdef _WIN32
+        bool in_progress = (WSAGetLastError() == WSAEWOULDBLOCK);
+#else
+        bool in_progress = (errno == EINPROGRESS);
+#endif
+        if (!in_progress) {
+            throw std::runtime_error("Failed to connect to " + ip);
+        }
+
+        fd_set wset;
+        FD_ZERO(&wset);
+        FD_SET(sock_, &wset);
+        struct timeval ctv;
+        ctv.tv_sec = static_cast<long>(timeout_s);
+        ctv.tv_usec = static_cast<long>((timeout_s - ctv.tv_sec) * 1e6);
+
+        int sel = select(static_cast<int>(sock_) + 1, nullptr, &wset, nullptr, &ctv);
+        if (sel <= 0) {
+            throw std::runtime_error("Connection timed out to " + ip);
+        }
+
+        // Check for socket error
+        int so_error = 0;
+        socklen_t len = sizeof(so_error);
+        getsockopt(sock_, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_error), &len);
+        if (so_error != 0) {
+            throw std::runtime_error("Failed to connect to " + ip);
+        }
     }
+
+    // Restore blocking mode
+#ifdef _WIN32
+    nonblock = 0;
+    ioctlsocket(sock_, FIONBIO, &nonblock);
+#else
+    fcntl(sock_, F_SETFL, flags);
+#endif
 
     registerSession();
     forwardOpen();
@@ -290,56 +337,95 @@ void EipConnection::forwardOpen() {
     conn_path.insert(conn_path.end(), {0x20, 0x02, 0x24, 0x01});
     uint8_t conn_path_words = static_cast<uint8_t>(conn_path.size() / 2);
 
-    // Forward Open service
-    std::vector<uint8_t> fo;
-    appendU8(fo, 0x54); // Forward Open service
-    appendU8(fo, 0x02); // path size (words)
-    appendU8(fo, 0x20); appendU8(fo, 0x06); // class 6
-    appendU8(fo, 0x24); appendU8(fo, 0x01); // instance 1
-    appendU8(fo, 0x0A); appendU8(fo, 0x0E); // priority/tick, timeout ticks
-    appendU32(fo, ot_id);
-    appendU32(fo, to_id);
-    appendU16(fo, conn_serial_);
-    appendU16(fo, 0x1234); // vendor ID
-    appendU32(fo, 0x00000001); // originator serial
-    appendU8(fo, 0x03); // timeout multiplier
-    fo.push_back(0); fo.push_back(0); fo.push_back(0); // reserved
-    appendU32(fo, 0x00201340); // O->T RPI
-    appendU16(fo, 0x43F4);     // O->T params (500 bytes, class 3)
-    appendU32(fo, 0x00201340); // T->O RPI
-    appendU16(fo, 0x43F4);     // T->O params
-    appendU8(fo, 0xA3);        // transport trigger
-    appendU8(fo, conn_path_words);
-    fo.insert(fo.end(), conn_path.begin(), conn_path.end());
+    // Try Large Forward Open (4002 bytes) first, fall back to standard (504 bytes)
+    qDebug() << "ForwardOpen: starting, conn_path_words=" << conn_path_words;
+    bool large_fo = true;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        std::vector<uint8_t> fo;
 
-    // Wrap in SendRRData
-    std::vector<uint8_t> payload;
-    appendU32(payload, 0); // interface
-    appendU16(payload, 0); // timeout
-    appendU16(payload, 2); // item count
-    appendU16(payload, 0x00); appendU16(payload, 0); // Null Address
-    appendU16(payload, 0xB2); appendU16(payload, static_cast<uint16_t>(fo.size()));
-    payload.insert(payload.end(), fo.begin(), fo.end());
+        // Common header fields
+        auto buildFoHeader = [&](uint8_t service) {
+            appendU8(fo, service);
+            appendU8(fo, 0x02); // path size (words)
+            appendU8(fo, 0x20); appendU8(fo, 0x06); // class 6
+            appendU8(fo, 0x24); appendU8(fo, 0x01); // instance 1
+            appendU8(fo, 0x0A); appendU8(fo, 0x0E); // priority/tick, timeout ticks
+            appendU32(fo, ot_id);
+            appendU32(fo, to_id);
+            appendU16(fo, conn_serial_);
+            appendU16(fo, 0x1234); // vendor ID
+            appendU32(fo, 0x00000001); // originator serial
+            appendU8(fo, 0x03); // timeout multiplier
+            fo.push_back(0); fo.push_back(0); fo.push_back(0); // reserved
+        };
 
-    auto pkt = buildEnipHeader(kSendRRData, session_, payload);
-    send(sock_, reinterpret_cast<const char*>(pkt.data()), static_cast<int>(pkt.size()), 0);
+        if (large_fo) {
+            // Large Forward Open (0x5B): 32-bit connection params, 4002 bytes
+            buildFoHeader(0x5B);
+            appendU32(fo, 0x00201234); // O->T RPI
+            appendU32(fo, 0x42000FA2); // O->T params (4002 bytes, variable, P2P)
+            appendU32(fo, 0x00204001); // T->O RPI
+            appendU32(fo, 0x42000FA2); // T->O params
+        } else {
+            // Standard Forward Open (0x54): 16-bit connection params, 504 bytes
+            buildFoHeader(0x54);
+            appendU32(fo, 0x00201234); // O->T RPI
+            appendU16(fo, 0x43F8);     // O->T params (504 bytes, variable, P2P)
+            appendU32(fo, 0x00204001); // T->O RPI
+            appendU16(fo, 0x43F8);     // T->O params
+        }
 
-    auto resp = recvEnip();
-    if (resp.size() < 24) throw std::runtime_error("Forward Open response too short");
-    uint32_t status = readU32(&resp[8]);
-    if (status != 0) throw std::runtime_error("Forward Open ENIP failed");
+        appendU8(fo, 0xA3); // transport trigger
+        appendU8(fo, conn_path_words);
+        fo.insert(fo.end(), conn_path.begin(), conn_path.end());
 
-    auto enip_payload = std::vector<uint8_t>(resp.begin() + 24, resp.end());
-    auto cip_resp = parseSendRRResponse(enip_payload);
+        // Wrap in SendRRData
+        std::vector<uint8_t> payload;
+        appendU32(payload, 0); // interface
+        appendU16(payload, 0); // timeout
+        appendU16(payload, 2); // item count
+        appendU16(payload, 0x00); appendU16(payload, 0); // Null Address
+        appendU16(payload, 0xB2); appendU16(payload, static_cast<uint16_t>(fo.size()));
+        payload.insert(payload.end(), fo.begin(), fo.end());
 
-    if (cip_resp.size() < 4 || cip_resp[2] != 0) {
+        auto pkt = buildEnipHeader(kSendRRData, session_, payload);
+        send(sock_, reinterpret_cast<const char*>(pkt.data()), static_cast<int>(pkt.size()), 0);
+
+        auto resp = recvEnip();
+        if (resp.size() < 24) throw std::runtime_error("Forward Open response too short");
+        uint32_t enip_status = readU32(&resp[8]);
+        if (enip_status != 0) throw std::runtime_error("Forward Open ENIP failed");
+
+        auto enip_payload = std::vector<uint8_t>(resp.begin() + 24, resp.end());
+        auto cip_resp = parseSendRRResponse(enip_payload);
+
+        qDebug() << "ForwardOpen:" << (large_fo ? "Large(0x5B)" : "Standard(0x54)")
+                 << "fo_size=" << fo.size()
+                 << "cip_resp_size=" << cip_resp.size()
+                 << "cip_status=" << (cip_resp.size() > 2 ? QString("0x%1").arg(cip_resp[2], 2, 16, QChar('0')) : "N/A");
+
+        if (cip_resp.size() >= 4 && cip_resp[2] == 0) {
+            // Success
+            ot_connection_id_ = readU32(&cip_resp[4]);
+            to_connection_id_ = readU32(&cip_resp[8]);
+            connection_size_ = large_fo ? 4002 : 504;
+            qDebug() << "ForwardOpen: SUCCESS connection_size=" << connection_size_;
+            break;
+        }
+
+        if (large_fo) {
+            // Large FO failed, try standard on next iteration
+            qDebug() << "ForwardOpen: Large FO failed, falling back to standard";
+            large_fo = false;
+            continue;
+        }
+
+        // Both failed
         uint8_t cip_status = cip_resp.size() > 2 ? cip_resp[2] : 0xFF;
+        qDebug() << "ForwardOpen: BOTH FAILED";
         throw std::runtime_error("Forward Open CIP failed: 0x" +
             std::to_string(cip_status));
     }
-
-    ot_connection_id_ = readU32(&cip_resp[4]);
-    to_connection_id_ = readU32(&cip_resp[8]);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 }

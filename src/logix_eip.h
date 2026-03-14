@@ -19,6 +19,7 @@ constexpr SocketType kInvalidSocket = INVALID_SOCKET;
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <netinet/tcp.h>
+#include <fcntl.h>
 using SocketType = int;
 constexpr SocketType kInvalidSocket = -1;
 #endif
@@ -100,6 +101,7 @@ public:
     void close();
 
     bool isConnected() const { return connected_; }
+    uint32_t connectionSize() const { return connection_size_; }
 
 private:
     void registerSession();
@@ -127,6 +129,7 @@ private:
     uint16_t sequence_ = 0;
     std::vector<std::pair<int, std::string>> route_;
     bool connected_ = false;
+    uint32_t connection_size_ = 504;
 };
 
 } // namespace logix

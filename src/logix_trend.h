@@ -11,11 +11,12 @@ constexpr uint16_t kTrendClass = 0xB2;
 /// A single sample from a trend buffer
 struct TrendSample {
     uint16_t count;      // Sample sequence number
-    uint32_t timestamp;  // Microseconds (PLC wall clock)
+    uint32_t timestamp;  // CIP Wall Clock ticks (128 us per tick)
     double value;        // Interpreted value (converted from raw bytes + type)
 };
 
-/// Manages a single CIP trend instance on the PLC (class 0xB2)
+/// Manages a single CIP trend instance on the PLC (class 0xB2).
+/// One tag per trend instance.
 class TrendInstance {
 public:
     TrendInstance(EipConnection& conn, const std::string& tag_name, uint16_t data_type);
@@ -25,8 +26,6 @@ public:
     TrendInstance& operator=(const TrendInstance&) = delete;
 
     /// Create the trend object on the PLC, configure rate, bind tag, and start
-    /// sample_rate_us: sample period in microseconds
-    /// buffer_size: PLC-side buffer allocation (default 4096)
     void start(uint32_t sample_rate_us, uint32_t buffer_size = 0x1000);
 
     /// Read available samples from the trend buffer
@@ -52,7 +51,6 @@ private:
     uint8_t removeTag();
     uint8_t deleteTrend();
 
-    /// Interpret raw 4/8-byte sample value according to data type
     double interpretValue(const uint8_t* raw_bytes) const;
 
     EipConnection& conn_;

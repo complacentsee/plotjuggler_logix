@@ -3,6 +3,8 @@
 #include <cstring>
 #include <stdexcept>
 
+#include <QDebug>
+
 namespace logix {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -30,31 +32,41 @@ TrendInstance::~TrendInstance() {
 void TrendInstance::start(uint32_t sample_rate_us, uint32_t buffer_size) {
     if (running_) return;
 
+    qDebug() << "Trend: creating for" << QString::fromStdString(tag_name_)
+             << "buffer_size=" << buffer_size << "sample_rate_us=" << sample_rate_us
+             << "sample_size=" << sampleSize();
+
     uint8_t status = createTrend(buffer_size);
     if (status != 0) {
-        throw std::runtime_error("Failed to create trend instance (status=0x" +
+        qDebug() << "Trend: createTrend FAILED status=" << QString("0x%1").arg(status, 2, 16, QChar('0'));
+        throw std::runtime_error("Failed to create trend (status=0x" +
             std::to_string(status) + ")");
     }
+    qDebug() << "Trend: created instance_id=" << instance_id_;
 
-    status = setAttributes(sample_rate_us, 0); // state=0 (stopped initially)
+    status = setAttributes(sample_rate_us, 0);
     if (status != 0) {
+        qDebug() << "Trend: setAttributes FAILED status=" << QString("0x%1").arg(status, 2, 16, QChar('0'));
         deleteTrend();
         throw std::runtime_error("Failed to set trend attributes");
     }
 
     status = addTag();
     if (status != 0) {
+        qDebug() << "Trend: addTag FAILED status=" << QString("0x%1").arg(status, 2, 16, QChar('0'));
         deleteTrend();
         throw std::runtime_error("Failed to bind tag '" + tag_name_ + "' to trend");
     }
 
     status = startTrend();
     if (status != 0) {
+        qDebug() << "Trend: startTrend FAILED status=" << QString("0x%1").arg(status, 2, 16, QChar('0'));
         removeTag();
         deleteTrend();
         throw std::runtime_error("Failed to start trend");
     }
 
+    qDebug() << "Trend: started successfully for" << QString::fromStdString(tag_name_);
     running_ = true;
 }
 
@@ -74,7 +86,6 @@ std::vector<TrendSample> TrendInstance::readData() {
 
     std::vector<TrendSample> samples;
 
-    // Each sample: count(2) + timestamp(4) + value(cipTypeSize)
     int rec_size = sampleSize();
     if (rec_size > 0 && cip.data.size() >= static_cast<size_t>(rec_size)) {
         for (size_t i = 0; i + rec_size <= cip.data.size(); i += rec_size) {
@@ -117,7 +128,7 @@ uint8_t TrendInstance::createTrend(uint32_t buffer_size) {
     appendU16(data, 8);  // attr 8: buffer size
     appendU32(data, buffer_size);
     appendU16(data, 3);  // attr 3: num tags
-    appendU8(data, 1);   // 1 tag
+    appendU8(data, 1);   // 1 tag per trend
 
     std::vector<uint8_t> msg;
     appendU8(msg, 0x08); // Create service
@@ -275,7 +286,6 @@ double TrendInstance::interpretValue(const uint8_t* raw) const {
             return v;
         }
         default: {
-            // Default: interpret as uint32
             uint32_t v; std::memcpy(&v, raw, 4);
             return static_cast<double>(v);
         }

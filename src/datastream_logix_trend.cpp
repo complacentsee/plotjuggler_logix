@@ -23,6 +23,13 @@ bool DataStreamLogixTrend::start(QStringList* selected_datasources) {
 
     config_ = dialog.getConfig();
 
+    // Clear any data from previous session
+    {
+        std::lock_guard<std::mutex> lock(mutex());
+        dataMap().numeric.clear();
+        dataMap().strings.clear();
+    }
+
     // Connect to PLC
     try {
         auto route = EipConnection::parseRouteString(config_.route);
@@ -35,14 +42,15 @@ bool DataStreamLogixTrend::start(QStringList* selected_datasources) {
         return false;
     }
 
-    // Create trend instances for each selected tag with appropriate buffer sizing
+    // Create one trend instance per tag
     trends_.clear();
-    poll_interval_ms_ = 500; // will be reduced based on fastest-filling trend
+    poll_interval_ms_ = 200;
     for (const auto& [tag_name, data_type] : config_.selected_tags) {
         try {
             auto trend = std::make_unique<TrendInstance>(*conn_, tag_name, data_type);
             int sample_size = trend->sampleSize();
-            auto [buf_size, poll_ms] = computeBufferParams(config_.sample_rate_us, sample_size);
+            auto [buf_size, poll_ms] = computeBufferParams(config_.sample_rate_us, sample_size,
+                                                            conn_->connectionSize());
             poll_interval_ms_ = std::min(poll_interval_ms_, poll_ms);
             trend->start(config_.sample_rate_us, buf_size);
             trends_.push_back(std::move(trend));
@@ -51,7 +59,6 @@ bool DataStreamLogixTrend::start(QStringList* selected_datasources) {
                                   QString("Failed to start trend for '%1':\n%2")
                                       .arg(QString::fromStdString(tag_name))
                                       .arg(e.what()));
-            // Clean up already-started trends
             trends_.clear();
             conn_->close();
             conn_.reset();
@@ -123,8 +130,6 @@ void DataStreamLogixTrend::pollingLoop() {
                     auto& series = dataMap().getOrCreateNumeric(trend->tagName());
 
                     for (const auto& sample : samples) {
-                        // Convert PLC timestamp to seconds.
-                        // Trend timestamps are in CIP Wall Clock ticks (128 us per tick).
                         constexpr double kTickToSeconds = 128.0 / 1e6;
                         double time_s;
                         if (first_sample_) {
@@ -132,12 +137,10 @@ void DataStreamLogixTrend::pollingLoop() {
                             first_sample_ = false;
                             time_s = 0.0;
                         } else {
-                            // Handle timestamp wraparound (uint32)
                             uint32_t delta;
                             if (sample.timestamp >= base_timestamp_) {
                                 delta = sample.timestamp - base_timestamp_;
                             } else {
-                                // Wraparound
                                 delta = (0xFFFFFFFF - base_timestamp_) +
                                         sample.timestamp + 1;
                             }
@@ -150,7 +153,6 @@ void DataStreamLogixTrend::pollingLoop() {
                     got_data = true;
                 }
             } catch (const std::exception&) {
-                // Connection lost or read error
                 running_ = false;
                 emit closed();
                 return;
@@ -168,23 +170,22 @@ void DataStreamLogixTrend::pollingLoop() {
 // ─── Buffer Sizing ──────────────────────────────────────────────────────────
 
 std::pair<uint32_t, uint32_t> DataStreamLogixTrend::computeBufferParams(
-    uint32_t sample_rate_us, int sample_size) {
+    uint32_t sample_rate_us, int sample_size, uint32_t connection_size) {
 
-    // Target: buffer holds at least 2 seconds of samples
-    double samples_per_sec = 1e6 / static_cast<double>(sample_rate_us);
-    uint32_t target_samples = static_cast<uint32_t>(samples_per_sec * 2.0);
-    uint32_t target_bytes = target_samples * sample_size;
+    // Size the buffer to fit within a single CIP response.
+    // Leave headroom for CIP headers (~20 bytes).
+    uint32_t max_payload = connection_size > 20 ? connection_size - 20 : 480;
+    uint32_t max_samples = max_payload / sample_size;
+    uint32_t buffer_size = max_samples * sample_size;
+    buffer_size = std::max(buffer_size, static_cast<uint32_t>(sample_size * 4));
 
-    // Clamp buffer: min 4096, max 65536
-    uint32_t buffer_size = std::max(4096u, std::min(65536u, target_bytes));
-
-    // Compute poll interval: drain at ~50% capacity for safety margin
+    // Poll interval: drain before buffer fills (50% safety margin)
     uint32_t capacity = buffer_size / sample_size;
     double fill_time_ms = capacity * (sample_rate_us / 1000.0);
     uint32_t poll_ms = static_cast<uint32_t>(fill_time_ms / 2.0);
 
-    // Clamp poll interval: min 50ms, max 500ms
-    poll_ms = std::max(50u, std::min(500u, poll_ms));
+    // Clamp poll interval: min 20ms, max 200ms
+    poll_ms = std::max(20u, std::min(200u, poll_ms));
 
     return {buffer_size, poll_ms};
 }
