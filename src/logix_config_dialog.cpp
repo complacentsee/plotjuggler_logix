@@ -15,13 +15,17 @@
 #include <QApplication>
 
 #include <cmath>
+#include <set>
 
 namespace logix
 {
 
 constexpr uint32_t kMaxTags = 256;
 
-LogixConfigDialog::LogixConfigDialog(QWidget* parent, const LogixConfig* previous) : QDialog(parent)
+LogixConfigDialog::LogixConfigDialog(QWidget* parent, const LogixConfig* previous,
+                                     const std::vector<TagInfo>& cached_tags,
+                                     const TagBrowser& cached_browser)
+    : QDialog(parent)
 {
   setWindowTitle("Logix (CIP 0xB2) Configuration");
   setMinimumSize(600, 500);
@@ -46,7 +50,26 @@ LogixConfigDialog::LogixConfigDialog(QWidget* parent, const LogixConfig* previou
       rate_custom_spin_->setValue(static_cast<int>(rate / 1000));
       rate_custom_spin_->setVisible(true);
     }
+
+    // Save previous tag selections for restoring after browse
+    previous_tags_ = previous->selected_tags;
   }
+
+  // If cached tags are available, populate tree immediately
+  if (!cached_tags.empty())
+  {
+    browser_ = cached_browser;
+    all_tags_ = cached_tags;
+    populateTagTree(all_tags_);
+    restoreTagSelections();
+    status_label_->setText(QString("Loaded %1 cached tags").arg(all_tags_.size()));
+    connect_btn_->setText("Refresh Tags");
+    ok_btn_->setEnabled(true);
+  }
+
+  // Invalidate cache when IP or route changes
+  connect(ip_edit_, &QLineEdit::textChanged, this, &LogixConfigDialog::onConnectionFieldsChanged);
+  connect(route_edit_, &QLineEdit::textChanged, this, &LogixConfigDialog::onConnectionFieldsChanged);
 }
 
 void LogixConfigDialog::setupUi()
@@ -82,7 +105,7 @@ void LogixConfigDialog::setupUi()
                           "  1,4,2,10.10.10.9 - backplane slot 4, then ethernet to IP");
   conn_layout->addWidget(route_edit_);
 
-  connect_btn_ = new QPushButton("Connect && Browse Tags");
+  connect_btn_ = new QPushButton("Browse Tags");
   conn_layout->addWidget(connect_btn_);
 
   main_layout->addLayout(conn_layout);
@@ -156,7 +179,7 @@ void LogixConfigDialog::setupUi()
   main_layout->addLayout(btn_layout);
 
   // ── Connections ─────────────────────────────────────────────────────
-  connect(connect_btn_, &QPushButton::clicked, this, &LogixConfigDialog::onConnect);
+  connect(connect_btn_, &QPushButton::clicked, this, &LogixConfigDialog::onBrowse);
   connect(select_all_btn_, &QPushButton::clicked, this, &LogixConfigDialog::onSelectAll);
   connect(deselect_all_btn_, &QPushButton::clicked, this, &LogixConfigDialog::onDeselectAll);
   connect(filter_edit_, &QLineEdit::textChanged, this, &LogixConfigDialog::onFilterChanged);
@@ -173,7 +196,7 @@ void LogixConfigDialog::setupUi()
   connect(tag_tree_, &QTreeWidget::itemChanged, this, &LogixConfigDialog::updateRamEstimate);
 }
 
-void LogixConfigDialog::onConnect()
+void LogixConfigDialog::onBrowse()
 {
   status_label_->setText("Connecting...");
   QApplication::processEvents();
@@ -184,19 +207,30 @@ void LogixConfigDialog::onConnect()
   try
   {
     auto route = EipConnection::parseRouteString(route_str);
-    conn_ = std::make_unique<EipConnection>();
-    conn_->connect(ip, route);
+    EipConnection conn;
+    conn.connect(ip, route);
 
-    all_tags_ = browser_.browse(*conn_, true, [this](const std::string& status) {
+    all_tags_ = browser_.browse(conn, true, [this](const std::string& status) {
       status_label_->setText(QString::fromStdString(status));
       QApplication::processEvents();
     });
+
+    // Done browsing — close the temporary connection
+    conn.close();
 
     status_label_->setText(QString("Building tag tree (%1 tags)...").arg(all_tags_.size()));
     QApplication::processEvents();
 
     populateTagTree(all_tags_);
+
+    // Restore previous tag selections if available
+    if (!previous_tags_.empty())
+    {
+      restoreTagSelections();
+    }
+
     status_label_->setText(QString("Found %1 tags").arg(all_tags_.size()));
+    connect_btn_->setText("Refresh Tags");
     ok_btn_->setEnabled(true);
   }
   catch (const std::exception& e)
@@ -204,8 +238,20 @@ void LogixConfigDialog::onConnect()
     status_label_->setText("Error");
     QMessageBox::critical(this, "Connection Error",
                           QString("Failed to connect:\n%1").arg(e.what()));
-    conn_.reset();
   }
+}
+
+void LogixConfigDialog::onConnectionFieldsChanged()
+{
+  if (all_tags_.empty())
+  {
+    return;  // nothing to invalidate
+  }
+  all_tags_.clear();
+  tag_tree_->clear();
+  ok_btn_->setEnabled(false);
+  connect_btn_->setText("Browse Tags");
+  ram_label_->clear();
 }
 
 void LogixConfigDialog::populateTagTree(const std::vector<TagInfo>& tags)
@@ -449,6 +495,38 @@ void LogixConfigDialog::collectSelectedTags()
   }
 }
 
+void LogixConfigDialog::restoreTagSelections()
+{
+  // Build a set of previously selected tag names for fast lookup
+  std::set<std::string> prev_names;
+  for (const auto& [name, type] : previous_tags_)
+  {
+    prev_names.insert(name);
+  }
+
+  tag_tree_->blockSignals(true);
+
+  std::function<void(QTreeWidgetItem*)> restore = [&](QTreeWidgetItem* item) {
+    QString tag_name = item->data(0, Qt::UserRole).toString();
+    if (!tag_name.isEmpty() && prev_names.count(tag_name.toStdString()))
+    {
+      item->setCheckState(0, Qt::Checked);
+    }
+    for (int i = 0; i < item->childCount(); i++)
+    {
+      restore(item->child(i));
+    }
+  };
+
+  for (int i = 0; i < tag_tree_->topLevelItemCount(); i++)
+  {
+    restore(tag_tree_->topLevelItem(i));
+  }
+
+  tag_tree_->blockSignals(false);
+  updateRamEstimate();
+}
+
 void LogixConfigDialog::onAccept()
 {
   collectSelectedTags();
@@ -480,7 +558,7 @@ void LogixConfigDialog::onAccept()
   config_.sample_rate_us = rate;
 
   // Warn if estimated PLC RAM exceeds 50 KB
-  uint32_t conn_size = conn_ ? conn_->connectionSize() : 4002;
+  uint32_t conn_size = 4002;
   size_t tags_per_inst = DataStreamLogixTrend::maxTagsPerInstance(rate, conn_size);
   size_t num_instances = (config_.selected_tags.size() + tags_per_inst - 1) / tags_per_inst;
   uint32_t per_instance_buf = estimateTagBufferSize(rate, tags_per_inst, conn_size);
@@ -528,7 +606,7 @@ void LogixConfigDialog::updateRamEstimate()
     rate = 10000;
   }
 
-  uint32_t conn_size = conn_ ? conn_->connectionSize() : 4002;
+  uint32_t conn_size = 4002;
 
   uint32_t tag_count = 0;
   std::function<void(QTreeWidgetItem*)> walk = [&](QTreeWidgetItem* item) {

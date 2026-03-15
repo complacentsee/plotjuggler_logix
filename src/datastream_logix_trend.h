@@ -66,6 +66,8 @@ private:
   std::vector<std::unique_ptr<TrendInstance>> trends_;
 
   LogixConfig config_;
+  std::vector<TagInfo> cached_tags_;
+  TagBrowser cached_browser_;
 
   // Per-tag timestamp tracking. Each tag has its own PLC timestamp
   // epoch, so we anchor each to the host clock on first sample.

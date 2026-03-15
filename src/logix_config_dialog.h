@@ -40,15 +40,26 @@ class LogixConfigDialog : public QDialog
   Q_OBJECT
 
 public:
-  explicit LogixConfigDialog(QWidget* parent = nullptr, const LogixConfig* previous = nullptr);
+  explicit LogixConfigDialog(QWidget* parent = nullptr, const LogixConfig* previous = nullptr,
+                             const std::vector<TagInfo>& cached_tags = {},
+                             const TagBrowser& cached_browser = TagBrowser());
 
   LogixConfig getConfig() const
   {
     return config_;
   }
+  const std::vector<TagInfo>& getTags() const
+  {
+    return all_tags_;
+  }
+  const TagBrowser& getBrowser() const
+  {
+    return browser_;
+  }
 
 private slots:
-  void onConnect();
+  void onBrowse();
+  void onConnectionFieldsChanged();
   void onSelectAll();
   void onDeselectAll();
   void onFilterChanged(const QString& text);
@@ -60,6 +71,7 @@ private:
   void populateTagTree(const std::vector<TagInfo>& tags);
   void applyFilter(const QString& filter);
   void collectSelectedTags();
+  void restoreTagSelections();
 
   /// Estimate PLC buffer bytes for one trend instance with num_tags tags
   static uint32_t estimateTagBufferSize(uint32_t sample_rate_us, size_t num_tags,
@@ -90,9 +102,9 @@ private:
 
   // State
   LogixConfig config_;
-  std::unique_ptr<EipConnection> conn_;
   TagBrowser browser_;
   std::vector<TagInfo> all_tags_;
+  std::vector<std::pair<std::string, uint16_t>> previous_tags_;  // selections to restore
 };
 
 }  // namespace logix

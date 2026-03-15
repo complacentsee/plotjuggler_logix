@@ -31,13 +31,16 @@ bool DataStreamLogixTrend::start(QStringList* selected_datasources)
   }
 
   // Show configuration dialog
-  LogixConfigDialog dialog(nullptr, config_.ip_address.empty() ? nullptr : &config_);
+  LogixConfigDialog dialog(nullptr, config_.ip_address.empty() ? nullptr : &config_,
+                           cached_tags_, cached_browser_);
   if (dialog.exec() != QDialog::Accepted)
   {
     return false;
   }
 
   config_ = dialog.getConfig();
+  cached_tags_ = dialog.getTags();
+  cached_browser_ = dialog.getBrowser();
 
   // Clear any data from previous session
   {
