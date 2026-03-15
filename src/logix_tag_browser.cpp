@@ -207,10 +207,18 @@ std::vector<TagInfo> TagBrowser::parseTagPacket(const std::vector<uint8_t>& data
 
 // ─── Browse ─────────────────────────────────────────────────────────────────
 
-std::vector<TagInfo> TagBrowser::browse(EipConnection& conn, bool include_program_tags)
+std::vector<TagInfo> TagBrowser::browse(EipConnection& conn, bool include_program_tags,
+                                        ProgressCallback on_progress)
 {
   program_names_.clear();
   udts_.clear();
+
+  auto report = [&](const std::string& msg) {
+    if (on_progress)
+    {
+      on_progress(msg);
+    }
+  };
 
   std::vector<TagInfo> all_tags;
 
@@ -220,6 +228,8 @@ std::vector<TagInfo> TagBrowser::browse(EipConnection& conn, bool include_progra
     int status = 6;
     while (status == 6 || status == 0)
     {
+      report("Browsing controller tags... (" + std::to_string(all_tags.size()) + " found)");
+
       auto request = buildTagListRequest("", offset);
       auto response = conn.sendUnconnected(request);
       auto cip = parseCipStatus(response);
@@ -240,15 +250,26 @@ std::vector<TagInfo> TagBrowser::browse(EipConnection& conn, bool include_progra
     }
   }
 
+  report("Found " + std::to_string(all_tags.size()) + " controller tags, " +
+         std::to_string(program_names_.size()) + " programs");
+
   // Get program-scoped tags
   if (include_program_tags)
   {
-    for (const auto& prog : program_names_)
+    size_t total_programs = program_names_.size();
+    for (size_t pi = 0; pi < total_programs; pi++)
     {
+      const auto& prog = program_names_[pi];
+      size_t tags_before = all_tags.size();
+
       uint16_t offset = 0;
       int status = 6;
       while (status == 6 || status == 0)
       {
+        report("Browsing program tags (" + std::to_string(pi + 1) + "/" +
+               std::to_string(total_programs) + ": " + prog + ")... " +
+               std::to_string(all_tags.size() - tags_before) + " tags");
+
         auto request = buildTagListRequest(prog, offset);
         auto response = conn.sendUnconnected(request);
         auto cip = parseCipStatus(response);
@@ -271,9 +292,10 @@ std::vector<TagInfo> TagBrowser::browse(EipConnection& conn, bool include_progra
   }
 
   // Resolve UDT definitions
-  resolveUdts(conn, all_tags);
+  resolveUdts(conn, all_tags, on_progress);
 
   // Assign human-readable type names
+  report("Finalizing " + std::to_string(all_tags.size()) + " tags...");
   for (auto& tag : all_tags)
   {
     tag.data_type_name = lookupTypeName(tag.symbol_type, tag.data_type_value);
@@ -354,8 +376,16 @@ std::vector<uint8_t> TagBrowser::getTemplate(EipConnection& conn, uint16_t insta
   return full_data;
 }
 
-void TagBrowser::resolveUdts(EipConnection& conn, const std::vector<TagInfo>& tags)
+void TagBrowser::resolveUdts(EipConnection& conn, const std::vector<TagInfo>& tags,
+                             ProgressCallback on_progress)
 {
+  auto report = [&](const std::string& msg) {
+    if (on_progress)
+    {
+      on_progress(msg);
+    }
+  };
+
   // Collect unique struct data type values
   std::set<uint16_t> unique_types;
   for (const auto& tag : tags)
@@ -368,6 +398,8 @@ void TagBrowser::resolveUdts(EipConnection& conn, const std::vector<TagInfo>& ta
 
   // Iteratively resolve UDTs (nested structs may need multiple passes)
   std::set<uint16_t> to_resolve = unique_types;
+  size_t total_udts = to_resolve.size();
+  size_t resolved_count = 0;
 
   while (!to_resolve.empty())
   {
@@ -377,8 +409,13 @@ void TagBrowser::resolveUdts(EipConnection& conn, const std::vector<TagInfo>& ta
     {
       if (udts_.count(type_id))
       {
+        resolved_count++;
         continue;
       }
+
+      resolved_count++;
+      report("Resolving UDTs (" + std::to_string(resolved_count) + "/" +
+             std::to_string(total_udts) + ")...");
 
       try
       {
@@ -579,6 +616,7 @@ void TagBrowser::resolveUdts(EipConnection& conn, const std::vector<TagInfo>& ta
     }
 
     to_resolve = next_resolve;
+    total_udts += next_resolve.size();
   }
 
   // Assign type names to UDT fields

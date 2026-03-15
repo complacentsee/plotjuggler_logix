@@ -7,6 +7,7 @@
 #pragma once
 
 #include "logix_eip.h"
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -52,9 +53,14 @@ struct UdtDef
 class TagBrowser
 {
 public:
+  /// Progress callback: receives a status string describing current activity.
+  using ProgressCallback = std::function<void(const std::string&)>;
+
   /// Browse all tags on the PLC. Connection must already be established.
   /// Returns list of all tags (controller + program scoped).
-  std::vector<TagInfo> browse(EipConnection& conn, bool include_program_tags = true);
+  /// Optional progress callback is invoked at each phase with a descriptive status.
+  std::vector<TagInfo> browse(EipConnection& conn, bool include_program_tags = true,
+                              ProgressCallback on_progress = nullptr);
 
   /// Get UDT definition by type ID (populated after browse())
   const UdtDef* getUdt(uint16_t type_id) const;
@@ -78,7 +84,8 @@ private:
                                       const std::string& program_name, uint16_t& last_offset);
 
   // Resolve UDT definitions for all struct tags
-  void resolveUdts(EipConnection& conn, const std::vector<TagInfo>& tags);
+  void resolveUdts(EipConnection& conn, const std::vector<TagInfo>& tags,
+                   ProgressCallback on_progress = nullptr);
 
   // Get template attribute (service 0x03, class 0x6C)
   std::vector<uint8_t> getTemplateAttribute(EipConnection& conn, uint16_t instance);

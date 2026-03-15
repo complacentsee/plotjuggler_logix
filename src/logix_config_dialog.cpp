@@ -85,10 +85,10 @@ void LogixConfigDialog::setupUi()
   connect_btn_ = new QPushButton("Connect && Browse Tags");
   conn_layout->addWidget(connect_btn_);
 
-  status_label_ = new QLabel("");
-  conn_layout->addWidget(status_label_);
-
   main_layout->addLayout(conn_layout);
+
+  status_label_ = new QLabel("");
+  main_layout->addWidget(status_label_);
 
   // ── Tag Selection ───────────────────────────────────────────────────
   main_layout->addWidget(makeSectionLabel("Tag Selection"));
@@ -187,10 +187,13 @@ void LogixConfigDialog::onConnect()
     conn_ = std::make_unique<EipConnection>();
     conn_->connect(ip, route);
 
-    status_label_->setText("Browsing tags...");
-    QApplication::processEvents();
+    all_tags_ = browser_.browse(*conn_, true, [this](const std::string& status) {
+      status_label_->setText(QString::fromStdString(status));
+      QApplication::processEvents();
+    });
 
-    all_tags_ = browser_.browse(*conn_);
+    status_label_->setText(QString("Building tag tree (%1 tags)...").arg(all_tags_.size()));
+    QApplication::processEvents();
 
     populateTagTree(all_tags_);
     status_label_->setText(QString("Found %1 tags").arg(all_tags_.size()));
@@ -207,6 +210,7 @@ void LogixConfigDialog::onConnect()
 
 void LogixConfigDialog::populateTagTree(const std::vector<TagInfo>& tags)
 {
+  tag_tree_->blockSignals(true);
   tag_tree_->clear();
 
   // Group tags by program (or "Controller" for non-program tags)
@@ -326,6 +330,7 @@ void LogixConfigDialog::populateTagTree(const std::vector<TagInfo>& tags)
     }
     // Non-numeric, non-struct tags (strings etc.) are skipped
   }
+  tag_tree_->blockSignals(false);
 }
 
 void LogixConfigDialog::onSelectAll()
