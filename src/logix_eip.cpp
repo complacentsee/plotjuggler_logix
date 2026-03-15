@@ -361,6 +361,7 @@ void EipConnection::connect(const std::string& ip,
 {
   close();
   route_ = route;
+  timeout_s_ = timeout_s;
 
   sock_ = socket(AF_INET, SOCK_STREAM, 0);
   if (sock_ == kInvalidSocket)
@@ -369,11 +370,19 @@ void EipConnection::connect(const std::string& ip,
   }
 
   // Set timeout
+#ifdef _WIN32
+  DWORD timeout_ms = static_cast<DWORD>(timeout_s * 1000);
+  setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_ms),
+             sizeof(timeout_ms));
+  setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout_ms),
+             sizeof(timeout_ms));
+#else
   struct timeval tv;
   tv.tv_sec = static_cast<long>(timeout_s);
   tv.tv_usec = static_cast<long>((timeout_s - tv.tv_sec) * 1e6);
   setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
   setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+#endif
 
   // Disable Nagle
   int flag = 1;
@@ -406,7 +415,8 @@ void EipConnection::connect(const std::string& ip,
 #endif
     if (!in_progress)
     {
-      throw std::runtime_error("Failed to connect to " + ip);
+      throw std::runtime_error("Failed to connect to " + ip + " (timeout=" +
+                               std::to_string(static_cast<int>(timeout_s * 1000)) + "ms)");
     }
 
     fd_set wset;
@@ -416,10 +426,15 @@ void EipConnection::connect(const std::string& ip,
     ctv.tv_sec = static_cast<long>(timeout_s);
     ctv.tv_usec = static_cast<long>((timeout_s - ctv.tv_sec) * 1e6);
 
+#ifdef _WIN32
+    int sel = select(0, nullptr, &wset, nullptr, &ctv);
+#else
     int sel = select(static_cast<int>(sock_) + 1, nullptr, &wset, nullptr, &ctv);
+#endif
     if (sel <= 0)
     {
-      throw std::runtime_error("Connection timed out to " + ip);
+      throw std::runtime_error("Connection timed out to " + ip + " (timeout=" +
+                               std::to_string(static_cast<int>(timeout_s * 1000)) + "ms)");
     }
 
     // Check for socket error
@@ -428,7 +443,8 @@ void EipConnection::connect(const std::string& ip,
     getsockopt(sock_, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_error), &len);
     if (so_error != 0)
     {
-      throw std::runtime_error("Failed to connect to " + ip);
+      throw std::runtime_error("Failed to connect to " + ip + " (timeout=" +
+                               std::to_string(static_cast<int>(timeout_s * 1000)) + "ms)");
     }
   }
 
@@ -813,7 +829,8 @@ std::vector<uint8_t> EipConnection::recvExact(size_t count)
                      static_cast<int>(count - received), 0);
     if (n <= 0)
     {
-      throw std::runtime_error("Connection closed or recv error");
+      throw std::runtime_error("Connection closed or recv error (timeout=" +
+                               std::to_string(static_cast<int>(timeout_s_ * 1000)) + "ms)");
     }
     received += n;
   }

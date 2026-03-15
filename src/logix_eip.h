@@ -18,6 +18,10 @@
 #pragma comment(lib, "ws2_32.lib")
 using SocketType = SOCKET;
 using ssize_t = int;
+#ifndef _SOCKLEN_T_DEFINED
+using socklen_t = int;
+#define _SOCKLEN_T_DEFINED
+#endif
 constexpr SocketType kInvalidSocket = INVALID_SOCKET;
 #else
 #include <sys/socket.h>
@@ -136,6 +140,7 @@ private:
   std::vector<uint8_t> parseSendUnitResponse(const std::vector<uint8_t>& payload);
 
   SocketType sock_ = kInvalidSocket;
+  double timeout_s_ = 5.0;
   uint32_t session_ = 0;
   uint32_t ot_connection_id_ = 0;
   uint32_t to_connection_id_ = 0;
