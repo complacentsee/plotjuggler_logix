@@ -381,32 +381,45 @@ void LogixConfigDialog::onFilterChanged(const QString& text)
 
 void LogixConfigDialog::applyFilter(const QString& filter)
 {
-  std::function<bool(QTreeWidgetItem*)> filterItem = [&](QTreeWidgetItem* item) -> bool {
-    bool any_child_visible = false;
+  // Returns pair: {visible, child_directly_matched}
+  std::function<std::pair<bool, bool>(QTreeWidgetItem*, bool)> filterItem =
+      [&](QTreeWidgetItem* item, bool parent_matches) -> std::pair<bool, bool> {
+    bool matches = filter.isEmpty() || item->text(0).contains(filter, Qt::CaseInsensitive);
 
+    // If this item or its parent matches, children should be visible
+    bool dominated = matches || parent_matches;
+
+    bool any_child_visible = false;
+    bool any_child_matched = false;
     for (int i = 0; i < item->childCount(); i++)
     {
-      if (filterItem(item->child(i)))
-      {
+      auto [child_vis, child_match] = filterItem(item->child(i), dominated);
+      if (child_vis)
         any_child_visible = true;
-      }
+      if (child_match)
+        any_child_matched = true;
     }
 
-    bool matches = filter.isEmpty() || item->text(0).contains(filter, Qt::CaseInsensitive);
-    bool visible = matches || any_child_visible;
+    bool visible = matches || any_child_visible || parent_matches;
     item->setHidden(!visible);
 
-    if (!filter.isEmpty() && visible)
+    // Only auto-expand when a descendant directly matched the filter,
+    // not when children are visible just because a parent matched
+    if (!filter.isEmpty() && any_child_matched)
     {
       item->setExpanded(true);
     }
+    else if (!filter.isEmpty())
+    {
+      item->setExpanded(false);
+    }
 
-    return visible;
+    return { visible, matches || any_child_matched };
   };
 
   for (int i = 0; i < tag_tree_->topLevelItemCount(); i++)
   {
-    filterItem(tag_tree_->topLevelItem(i));
+    filterItem(tag_tree_->topLevelItem(i), false);
   }
 }
 
